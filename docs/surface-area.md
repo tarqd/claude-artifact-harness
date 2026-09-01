@@ -463,6 +463,17 @@ presence?}`, plus `/{threadId}` (reply), `/resolve {resolved}`, `/delete`,
 `/activate {activated}`, `/{threadId}/{commentId}/edit {text}`. Public
 readers also get thread data from `/_f/<ver>/index.html.json?__frame_t=<token>`.
 
+`sendToClaude` on the host side is a lazily loaded chunk that imports
+`createArtifactSession`, `createCoworkSession`, `fetchArtifactSessions`,
+`getArtifactSession`, and `postSessionMessage`: it starts or reuses a Claude
+Code cloud session (or a Cowork session) for the artifact and posts a fixed
+prompt telling that session to read the threads with the Artifact tool's
+`comments` action, act, `reply`, and `resolve`. A self-host that wants this
+feature needs an agent runner behind it. The exact result shapes of the
+page-facing `create`, `reply`, `resolve`, `delete`, and `sendToClaude` calls
+were not recovered from the bundles and remain an inference from the REST
+layer.
+
 ### 9.3 Translation (`_translate.js`, lazy on first `__ft_cmd`)
 
 - ← `__ft_cmd {action: "probe" \| "translate" \| "revert", target?: BCP-47, engineHost?: boolean}`
