@@ -1,0 +1,117 @@
+# Design: self-hosted artifact shell
+
+Goal: run artifacts authored for claude.ai unchanged on our own server, using
+the **shell architecture** (option B in `docs/surface-area.md` §12). Each
+artifact is served in a sandboxed iframe on its own origin; a clean-room
+frame runtime provides `window.claude.use()`; the parent shell brokers every
+capability call to our backend over the same `__frame_*` postMessage
+protocol claude.ai uses. Matching the wire protocol lets us later run
+Anthropic's own runtime modules against our shell as a conformance test.
+
+Read `docs/surface-area.md` first. The wire shapes and error codes there
+are the contract; the type definitions in `reference/contract/0.2.32/`
+are the page-facing API that must hold exactly.
+
+## Stack
+
+- TypeScript, Node 22, ESM, single package (`package.json` at repo root, no
+  workspaces). Dependencies are installed by the spine only: `hono`,
+  `@hono/node-server`, `ws`, `@anthropic-ai/sdk`, `esbuild`, `vitest`,
+  `@playwright/test`, `typescript`, `tsx`, and `@types/*`. Slices must not add
+  dependencies; report a need instead.
+- Playwright uses the preinstalled Chromium (`PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`; never run `playwright install`).
+- Scripts: `npm run build` (esbuild: frame preamble IIFE, one ESM module per capability, shell bundle), `npm test` (vitest unit tests), `npm run e2e` (Playwright against a server started by the test), `npm run dev` (server with watch).
+
+## Layout
+
+```
+src/
+  protocol/          # shared types + constants (spine-owned)
+    messages.ts      # __frame_* and __frame_cap envelope types
+    errors.ts        # error code unions per capability, error factory
+    capabilities.ts  # CAPABILITIES: the fixed list of slice names
+    paths.ts         # path grammar helpers (db paths, ids)
+  frame/             # runs INSIDE the artifact iframe (clean-room runtime)
+    preamble.ts      # window.claude.use, handshake, theme, nav, size, RTC lockdown
+    rpc.ts           # shared __frame_cap request/reply client with timeouts and ack
+    index.ts         # module loader: imports capabilities/<name>/frame.ts
+  shell/             # runs in the parent page (host)
+    host.ts          # iframe mount, sandbox/allow, handshake, reveal, theme, nav
+    broker.ts        # __frame_cap dispatcher: routes to capabilities/<name>/broker.ts
+    consent.ts       # small consent dialog primitive (inert gating)
+    index.ts
+  server/            # Node backend
+    index.ts         # boot: two Hono apps (shell origin, frame origin) + ws upgrade
+    store.ts         # filesystem store under data/: artifacts, versions, blobs, db
+    auth.ts          # viewer identity cookie (u_<22>), owner token, sharing level
+    serve.ts         # /_f/<ver>/..., /_runtime/*.js, /_blob/<id>, shell page
+    routes.ts        # mounts capabilities/<name>/server.ts routes
+  capabilities/
+    <name>/
+      frame.ts       # export install(ctx): mounts the namespace (page-facing API)
+      broker.ts      # export handle(call, ctx): Promise<result> and push channels
+      server.ts      # export routes(app, ctx) and optional ws lanes
+      README.md      # what is implemented, what is stubbed, how to test
+test/
+  <name>/            # vitest unit tests per slice
+e2e/                 # Playwright specs
+fixtures/            # sample artifact HTML pages exercising each capability
+```
+
+Slice names (`src/protocol/capabilities.ts`): `artifact`, `db`, `sample`,
+`user`, `permissions`, `downloads`, `room`, `assets`, `network`. Also
+`self` as an alias of `artifact`. Out of scope for v0: `mcp`, `comments`,
+`notifications`, `embed`, live-doc `edit`/`sync` (the artifact namespace
+still exposes `edit` and `sync` and rejects them with `capability_disabled`).
+
+Ownership rule for parallel work: a slice edits only `src/capabilities/<name>/`,
+`test/<name>/`, and `fixtures/<name>*.html`. Everything else is spine-owned;
+the spine ships a compiling stub for every slice, which the slice replaces.
+
+## Origins and URLs
+
+- Shell origin: `http://localhost:8787` (`SHELL_PORT`). Shell page at `/a/<artifactId>`; APIs under `/api/frame/...` mirroring claude.ai paths where sensible.
+- Frame origin: `http://<artifactId>.localhost:8788` (`FRAME_PORT`). Chromium resolves `*.localhost` to loopback. Artifact content at `/_f/<ver>/index.html` (and other files), runtime at `/_runtime/<name>.js`, blobs at `/_blob/<id>`. When the Host header has no subdomain, `/_a/<artifactId>/...` prefix form is accepted for tooling.
+- The frame origin serves a CSP header reproducing the documented allowlist (`script-src 'self' 'unsafe-inline' cdnjs.cloudflare.com cdn.jsdelivr.net cdn.tailwindcss.com code.jquery.com; style-src 'self' 'unsafe-inline' fonts.googleapis.com; font-src fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' <network.origins>; frame-ancestors <shell origin>`).
+- Iframe attributes exactly as claude.ai: `sandbox="allow-scripts allow-same-origin allow-forms"`, `allow="fullscreen; clipboard-write; gamepad"`, `referrerpolicy="no-referrer"`, `inert` until ready.
+
+## Page envelope
+
+On publish the server stores the author's HTML as submitted. On serve it
+injects, before the author's content: `<!doctype html><html><head>` +
+`<script>window.__FRAME_PREAMBLE={...}</script>` + the preamble IIFE +
+`<meta charset>` + `<meta viewport>` + the documented reset style, then
+`</head><body>` … `</body></html>`. If the author's HTML already starts with
+a doctype (a `publish(html)` from a page), inject the preamble as the first
+child of `<head>` instead. `<title>` is read from the first 8 KB for metadata.
+
+## Protocol conventions (all sides)
+
+- Frame → shell RPC: `{__frame_cap: true, cap, id, method, args}`; shell → frame `{__frame_cap_r: true, id, result}` or `{…, error: {code, message, …}}`; `{__frame_cap_ack: true, id}` while a call waits on the viewer; `{__frame_cap_p: true, id, p}` for progress. Push channels: `__frame_db_ev`, `__frame_room_ev`.
+- Handshake: frame posts `{__frame_connect: true}` to `*`; shell replies `{__frame_init: {contract: "0.2.32", changes: [], flags: [], theme, capabilities: {name: {config}}, capBudgets}}`; frame posts `{__frame_ready: true}`; shell reveals and posts `{__frame_size_poke: true}`. Theme changes: `{__frame_theme: {theme}}`.
+- Origin discipline: frame accepts only `source === parent` at the origin that sent `__frame_init` (allowed origins listed in `__FRAME_PREAMBLE.origins`); shell accepts only `source === iframe.contentWindow` at the iframe's origin.
+- Default reply timeout 130 s in the frame; ack extends to 900 s.
+- Error objects are plain `{code, message}` (never `Error` instances); namespaces are frozen null-prototype objects; every namespace method rejects rather than throws (wrap sync throws).
+- Tokens never reach the frame. The shell holds the viewer session; the server authorizes on the session cookie plus per-artifact sharing level.
+
+## Auth and sharing (v0)
+
+- Every visitor gets a `u_` + 22 base62 chars id in a signed cookie on the shell origin. The owner logs in by visiting `/login?token=<ARTIFACT_OWNER_TOKEN>` (env var); the owner is `owner` on every artifact. Other visitors are `admin` when `ARTIFACT_DEFAULT_LEVEL=admin`, else `interact`. The frame origin gets identity via the asset token in the `/_f/` URL (`__frame_t`), a signed short-lived token that names the viewer and artifact, exactly like claude.ai; the server validates it on every frame-origin request that needs identity.
+- `user.config` sent to the frame: `{id, owner, canEdit, profile: true, email: false}`.
+
+## Backend storage (v0)
+
+Filesystem under `DATA_DIR` (default `./data`):
+`artifacts/<id>/meta.json` (title, favicon, capabilities declaration, current version), `artifacts/<id>/versions/<ver>/index.html` and other files, `artifacts/<id>/db/` (one JSON file per document; an in-memory index rebuilt at boot; a single-process write lock), `artifacts/<id>/blobs/<id>` with a sidecar `.json` for content type. Publishing is compare-and-set on the current version id and returns `{version}` or a 409 that the broker maps to `conflict`.
+
+Admin API on the shell origin for tooling: `POST /api/artifacts` (create from HTML + capabilities), `GET /api/artifacts/<id>`, `POST /api/artifacts/<id>/publish` (owner). A CLI `npm run publish -- <file.html> --capabilities '{"db":{}}'` wraps it.
+
+## Sample proxy
+
+`@anthropic-ai/sdk` with `ANTHROPIC_API_KEY`. Tiers: `quick` → `claude-haiku-4-5-20251001`, `default` → `claude-sonnet-5`, `complex` → `claude-opus-5`. Streaming over SSE to the shell; the shell forwards deltas as `__frame_cap_p {p: {type: "text", text: <delta>}}`; page tools become Anthropic `tools` and each `tool_use` block becomes `__frame_cap_p {p: {type: "tool_use", calls}}` awaiting `toolResults`. Consent: the shell asks once per artifact per viewer (persisted in the shell's localStorage) and sends `__frame_cap_ack` while the dialog is open. Answers are cached shell-side for 5 minutes by `(input, modelTier, images hash, verb)`. Legacy `window.claude.complete(prompt)` is provided by the preamble as a wrapper over `sample`.
+
+## Testing bar
+
+- Unit tests per slice with vitest (path grammar, validation, broker mapping, store behaviour).
+- One Playwright e2e per slice loading `fixtures/<name>.html` through the real shell and server and asserting the page-facing behaviour (e.g. a db write from one page is seen by a second page's `onSnapshot`).
+- `npm run build && npm test && npm run e2e` must pass before a slice reports done.
