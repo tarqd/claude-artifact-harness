@@ -21,6 +21,7 @@ curl -sSL "https://claude.ai/code/artifact/${UUID}" -o "$OUT/shell/served.html"
 #    own served HTML, which needs an authenticated read (Artifact tool, action:
 #    read). Fall back to the list captured on 2026-09-01 when none is supplied.
 LIST="${RUNTIME_FILES:-_comments.C6E0cR5g.js _transforms.DSB5x63f.js _translate.5HCW4BJh.js artifact.EF7sW8YL.js assets.8Gk803W0.js comments.vw5vQdGA.js db.h-3sndFg.js downloads.C3GSvEDP.js embed.CxGAyc-v.js mcp.Bvma3qD7.js network.B5UA9Su4.js notifications.ssU4jy7G.js permissions.BNySkLV5.js room.VSdFwTE9.js sample.BW2Uysoh.js user.BpKav-Rf.js handlerError.kGkFgEUi.js}"
+SHELL_EXTRA="frame-shell-broker-Bvj5PsoN.js frame-shell-replica-DJM6AQlN.js c26621f4a-CeTsb9NB.js"
 for f in $LIST; do
   curl -sSL "$HOST/_runtime/$f" -o "$OUT/runtime/$f"
   echo "runtime/$f $(wc -c < "$OUT/runtime/$f")"
@@ -31,6 +32,11 @@ grep -o "$ASSETS/[A-Za-z0-9._-]*\.js" "$OUT/shell/served.html" | sort -u | while
   f="$(basename "$url")"
   curl -sSL "$url" -o "$OUT/shell/$f"
   echo "shell/$f $(wc -c < "$OUT/shell/$f")"
+done
+
+# 3b. Lazily loaded shell chunks not referenced from served.html (names captured 2026-09-01).
+for f in $SHELL_EXTRA; do
+  curl -sSL "$ASSETS/$f" -o "$OUT/shell/$f" && echo "shell/$f $(wc -c < "$OUT/shell/$f")"
 done
 
 # 4. Pretty-print for reading.

@@ -98,7 +98,21 @@ markup. Key behaviour, from the code:
 4. `window.claude` is defined non-writable, non-configurable. `use` is added as a non-enumerable member. A deferred promise is created per capability listed in the preamble.
 5. Frame posts `{__frame_connect: true}` to `*`, then waits up to **10 s** for `{__frame_init: {...}}` from an allowed origin (default `https://claude.ai`, `https://preview.claude.ai`; `host:*` port wildcards supported). No init: every deferred resolves `null`.
 6. On init: theme is stamped (`data-theme` + `style.colorScheme` for `light`/`dark`; removed for `system`), capability modules are dynamically imported from `/_runtime/<file>`, `_transforms.buildBoot(init, TRANSFORMS, {shellOrigin, mount, hooks})` builds the boot context, each module's `install(ctx)` runs and calls `ctx.mount(name, namespace)`, which resolves the deferred. Unmounted names resolve `null`. Then after `DOMContentLoaded` the frame posts `{__frame_ready: true}` and installs the size reporter.
-7. `__frame_init` fields consumed by the runtime: `theme`, `capabilities` (map of name → `{config?, optional?}`), `contract`, `changes` (feature-change ids, e.g. `db-path-call-site`), `flags`, `capBudgets` (per-capability, per-method reply budgets in ms).
+7. `__frame_init` as the shell actually sends it (full analysis in `docs/analysis/shell.md`):
+
+   ```jsonc
+   {
+     "contract": "0.2.32",              // or "0.0.0" when the runtime is disabled
+     "changes": ["db-path-call-site", "artifact-sync-reject", ...],
+     "flags": ["artifact_files"],       // the only flag today
+     "theme": "light" | "dark" | "system",
+     "capabilities": { "<name>": { "config": { ... } } },   // never carries tokens
+     "capBudgets": { "mcp": {"callTool": 130000, "listTools": 130000}, "sample": {"sample": 330000}, "handlers": {"fetch": 130000} }
+   }
+   ```
+   Capabilities declared `optional: true` are dropped (except `artifact`/`self`); `remote_control` is never forwarded. `user.config` is `{id, owner, canEdit, profile, email}` and is synthesized as `{id: null, owner, canEdit, profile: false, email: false}` for pages that did not declare `user` but whose viewer can edit. `artifact.config` gains `{kind: "live_doc", docs: [{path}]}` for live docs. `permissions` gets `{}` when enabled. Everything else is the declared config verbatim.
+
+8. Reveal state machine on the shell: the iframe is created `inert` and hidden, revealed when both `__frame_ready` and the iframe `load` event have fired (or 2 s after load without ready). A frame may post `__frame_reveal_hold` then `__frame_reveal_ready` (≤ 5 s) and receives `__frame_revealed`. `__frame_load_error {code}` and `__frame_denied` drive reload and credential fallback paths.
 
 Messages the preamble itself handles after init (shell → frame, origin-checked):
 
@@ -524,14 +538,31 @@ Documented allowlist (CSP-enforced on the frame host):
 | `frame-src` | not documented; `iframe` text patches are refused by the runtime |
 
 Everything else, including a library's own runtime fetches, is blocked
-silently. The `sandbox` and `allow` attributes on the shell's iframe are
-covered in the shell analysis (pending).
+silently. The CSP itself is served as a header by the frame origin and is
+not visible in the client bundles; the allowlist above is the documented
+one.
+
+The shell's iframe (from the bundle):
+
+```
+sandbox="allow-scripts allow-same-origin allow-forms"   (+ allow-popups only when the artifact enables it, on web/desktop)
+allow="fullscreen; clipboard-write; gamepad"           (+ "translator; language-detector" when translation is enabled)
+referrerpolicy="no-referrer"   allowfullscreen   inert (until ready)
+```
+
+No `allow-downloads`, `allow-modals`, or `allow-top-navigation`, which is
+why downloads and navigation are relayed through `__frame_blocked` and
+`__frame_nav`. The iframe is made `inert` whenever a consent dialog or
+other decision surface is open, to prevent clickjacking of consent.
 
 ### 10.2 Shell-side hosts and modes
 
 - Shell page: `https://claude.ai/code/artifact/<uuid>`; iframe slot carries `data-frame-uchost="<uuid>.frame.claudeusercontent.com"` and `data-frame-tophost="<uuid>-top.frame.claudeusercontent.com"`.
 - Host flags read from `window.claudeDesktopArtifactPane` or query string: `embedded`, `chrome=none`, `mode=light|dark|system`, `platform=web|desktop`, `font=anthropic|system`, and `hostcaps` from the set `comment-mode artifact-nav comment-summon cloud-session cowork-task viewer-context chrome presence host-tools context-card context-send host-nav`.
-- The org id is read from the `org` query parameter or a cookie, and the shell bundles are `frame-shell`, `frame-shell-chrome`, `frame-shell-deferred`, `shared-frame`, `vendor-frame`.
+- The org id is read from the `org` query parameter or the `lastActiveOrg` cookie. Shell bundles: `frame-shell` (boot, mount, handshake), `frame-shell-deferred` (nav, size, websockets, live-doc replica), `frame-shell-broker` (lazily loaded capability brokers), `frame-shell-chrome` (React header, comment mode, translate), `frame-shell-replica`, `shared-frame`, `vendor-frame`.
+- Boot: `GET /api/frame/<uuid>?org=&via=&sk=&ver=&vanity=&bk=initial` with headers `X-Frame-CP: go`, `X-Frame-Platform`, `X-Frame-Surface`, `X-Frame-Client-Version`, `X-Frame-Session-Id`. The response carries the version id, an `assetToken` (24-char secret, viewer account uuid, artifact uuid, expiry), `wsToken` and `syncToken` for the two websockets, `consentToken`, the `capabilities` map with per-capability tokens (kept shell-side), the `viewer` record (`account, id "u_…", profile, email, owner, can_edit`), the runtime contract and change list, and a few dozen feature booleans.
+- Frame URL: `https://<uuid>.frame.claudeusercontent.com/_f/<ver>/?__frame_t=<assetToken>&__frame_v=<manifest>` (tokenless public views omit `__frame_t`; a token-exchange variant uses `/_t?…&v=<ver>`). The token is renewed every 24 to 29 minutes through a hidden iframe with `__frame_renew=1`.
+- Realtime: `wss://claude.ai/api/frame/sync?slug=<uuid>` (subprotocols `frame-sync.v1` and the sync token) carries db rows, room broadcasts and presence, and control notices; `wss://claude.ai/edge-api/frame-live/<uuid>/ws` (subprotocol `frame-live.v1` and the ws token) carries version changes, presence counts, comment and watcher notices.
 
 ---
 
@@ -560,19 +591,34 @@ and lets us swap backends per capability. Anthropic's runtime modules could
 be used only for testing since they are proprietary; ours must be a
 clean-room implementation of the same messages.
 
-Either way, the backend surface to provide is:
+Either way, the backend surface to provide, with the endpoints claude.ai's
+broker calls today for reference (all `POST … ?org=<org>` with JSON bodies
+carrying the capability token, except where noted):
 
-| Capability | Backend needed |
-|---|---|
-| `artifact` | Version store with compare-and-set publish (html or files), live-reload fan-out; optional live-doc edit journal with `data-id` stamping |
-| `db` | JSON document store with realtime subscriptions, queries, leases, per-user paths, rules |
-| `sample` | LLM proxy (Anthropic Messages API) with streaming, tool rounds, image handling, consent, caching, rate limits |
-| `mcp` | MCP client broker with per-viewer connector credentials, caching, watches |
-| `room` | WebSocket or similar pub/sub with presence, per-topic ACL |
-| `user` / `permissions` | Auth, sharing levels (`view` / `interact` / `admin` / `owner`), consent state |
-| `downloads` | Host-side save confirmation UI |
-| `assets` | Blob store served at `/_blob/<id>` |
-| `notifications` | Message delivery to users |
-| `comments` | Thread store anchored to DOM ids, optional Claude hand-off |
-| `network` | CSP `connect-src` generation from declared origins |
-| `embed` | Static serving of pinned dependency artifacts under `/_dep/<n>/` |
+| Capability | Backend needed | claude.ai reference endpoints |
+|---|---|---|
+| `artifact` | Version store with compare-and-set publish (html or files), live-reload fan-out; optional live-doc edit journal with `data-id` stamping | `/api/frame/self/<uuid>` `{token, baseVersion, html \| files}` → `{version}`, 409 = `conflict`; live docs `/api/frame/doc/<uuid>/ops` and `/replica`; `/api/frame/versions/<uuid>` |
+| `db` | JSON document store with realtime subscriptions, queries, leases, per-user paths, rules | `/api/frame/db/<uuid>/call` `{token, verb, …}` (`/public-call` for anonymous readers); `/api/frame/db/<uuid>/subscribe` `{token, spec}` → `{grant, spec, expires_in}`; rows over the sync websocket lane `store:db` |
+| `sample` | LLM proxy with streaming, tool rounds, image handling, consent, caching, rate limits | `/api/frame/sample/call` `{slug, token, prompt \| messages, modelTier?, images?, format?}` as SSE (`start{modelTierApplied}`, `text{text}`, `tool_use`, `done{truncated}`, `error`); consent `/api/frame/consent/<uuid>` `{consentToken, ops: [{kind, grant \| revoke, seenSeq}]}` |
+| `mcp` | MCP client broker with per-viewer connector credentials, caching, watches | `/api/frame/mcp/servers` `{slug, mcpToken}`; `/api/frame/mcp/call` `{slug, server, tool, input, mcpToken, serverId?}`; reauth popup via `/api/organizations/<org>/mcp/start-auth/<server>` |
+| `room` | Pub/sub with presence, per-topic ACL | No HTTP; sync websocket broadcasts on `app:<topic>` and presence grants |
+| `user` / `permissions` | Auth, sharing levels (`view` / `interact` / `admin` / `owner`), consent state | `/api/account`; `/api/frame/user/email/<uuid>` `{token}`; profiles and search through the chrome's user directory |
+| `downloads` | Host-side save confirmation UI | none (shell-side dialog, then a browser download; 5 per minute) |
+| `assets` | Blob store served at `/_blob/<id>` | `/api/frame/blob/<uuid>/upload` raw body with `Content-Type` and `X-Frame-Blobs-Token`; `/blob/<uuid>/list` `{after?}`; `/blob/<uuid>/<id>/delete` |
+| `notifications` | Message delivery to users | `/api/frame/notifications/send/<uuid>` `{type, to, body, key?, fragment?, token}` → `{accepted}` |
+| `comments` | Thread store anchored to DOM paths, optional Claude hand-off | `/api/frame/comments/<uuid>` and `/<threadId>`, `/resolve`, `/delete`, `/activate`, `/<threadId>/<commentId>/edit`; public thread data at `/_f/<ver>/index.html.json?__frame_t=…` |
+| `handlers` (undocumented, seen in the broker) | Server-side fetch proxy | `/api/frame/handlers/<uuid>/call` `{token, request}` |
+| `network` | CSP `connect-src` generation from declared origins | none |
+| `embed` | Static serving of pinned dependency artifacts under `/_dep/<n>/` | none |
+| telemetry | optional | `/api/frame/track`, `/api/frame/telemetry`, `/api/frame/page-health/<uuid>`, `/api/frame/access-request/<uuid>` |
+
+The minimum a self-hosted shell must do, in order: give each artifact its
+own origin and serve `/_runtime/*.js` beside it; put the shell origin in
+`__FRAME_PREAMBLE.origins`; answer `__frame_connect` with `__frame_init`;
+reveal on `__frame_ready` plus `load` and post `__frame_size_poke`; forward
+`__frame_theme`; relay `__frame_nav`; answer every `__frame_cap` with a
+`__frame_cap_r` (sending `__frame_cap_ack` when a call will wait on the
+user); and implement the per-capability push channels (`__frame_db_ev`,
+`__frame_room_ev`, `__frame_mcp_watch`, `__frame_cap_p`). Unimplemented
+capabilities should simply be left out of `__frame_init.capabilities`, so
+`use()` resolves `null` and well-written pages degrade on their own.
