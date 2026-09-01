@@ -1,0 +1,4 @@
+node_modules/
+# Fetched Anthropic runtime/shell bundles (proprietary; re-fetch with scripts/fetch-runtime.sh)
+reference/runtime/
+reference/shell/
