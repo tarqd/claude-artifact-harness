@@ -305,13 +305,74 @@ and the DOM capture machinery (`artifact-sync`, `artifact-local`,
 
 ## 7. `sample` (ask Claude)
 
-See `reference/contract/0.2.32/sample.d.ts`. Wire-level analysis pending:
-streaming events, tool rounds executed in-page, image preprocessing, cache
-keys.
+Page API per `reference/contract/0.2.32/sample.d.ts`. Full wire analysis in
+`docs/analysis/sample-room.md`. The namespace is a function with members
+`sample`, `json`, `limits`.
+
+Config from `__frame_init.capabilities.sample.config`:
+`{images?: {maxCount 4, maxBytes 2e6, maxTotalBytes 5e6, maxEdgePx 1568, patchPx 28, maxPatches 1568, mediaTypes ["image/jpeg","image/png"]}, tools?: {maxCount 16}}`.
+Omitting `images` or `tools` makes `limits()` omit them and the matching
+calls reject locally with `images_unavailable` / `tools_unavailable`.
+
+Everything the frame does before the wire: input validation (64 KiB, 1000
+turns, user-first-and-last), option validation with the documented hints,
+image decode and downscale to roughly 1.23 MP via canvas (jpeg/webp/png at
+0.85 then 0.7 quality), and tool definition validation (name
+`^[A-Za-z0-9_-]{1,128}$`, description ≤ 1 KB, schema ≤ 4 KB and depth ≤ 8,
+all definitions ≤ 32 KB). The frame computes no cache keys; caching,
+consent, concurrency, and tier substitution are entirely shell-side.
+
+Wire (cap `sample`, ids `a<n>`):
+
+| Direction | Message |
+|---|---|
+| → | `method: "sample"`, `args: [input, modelTier?, {images?: Blob[], cache?, format?: "json", tools?: [{name, description, inputSchema}]}]` |
+| ← | `__frame_cap_ack {id}` while the call is held (consent or queue); extends the timeout from 332 s to 900 s |
+| ← | `__frame_cap_p {id, p: {type: "text", text}}` where `text` is a **delta**; frame accumulates and calls `onText({text: whole, delta})` |
+| ← | `__frame_cap_p {id, p: {type: "tool_use", calls: [{id, name, input}]}}`; frame runs `execute` for each call concurrently with a 150 s timeout |
+| → | `method: "toolResults"`, `args: [callId, [{id, content, isError?}]]` (fresh id; reply ignored; ≤ 32 KB per result) |
+| → | `method: "cancelCall"`, `args: [callId]` on abort, timeout, or `pagehide` |
+| ← | `__frame_cap_r {id, result: {text, truncated, modelTierApplied, value?}}`; `text` must start with the accumulated deltas or the frame rejects `upstream_error` |
+| ← | `__frame_cap_r {id, error: {code, message, text?}}`; the frame appends the partial text unless the code is `refused` |
+
+`json()` uses `result.value` when the shell supplies one, else parses the
+text tolerantly (whole reply, one code fence, or first `{`/`[` to last).
+The reply budget is `min(capBudgets.sample.sample, 600000) + 2000`; the
+shell sends 330 000, so 332 s.
 
 ## 8. `room` (presence and events)
 
-See `reference/contract/0.2.32/room.d.ts`. Wire-level analysis pending.
+Page API per `reference/contract/0.2.32/room.d.ts`. Full analysis in
+`docs/analysis/sample-room.md`.
+
+Config `capabilities.room.config.limits`: `maxBytes` 4096, `presenceHz` 30,
+`keepaliveMs` 20 000, `silenceMs` 150 000, `maxPeers` 256. The `topics`
+ACL is enforced by the shell only.
+
+Wire (cap `room`, ids `r<n>`, 130 s timeout, request/reply):
+
+| Method | Args | Reply |
+|---|---|---|
+| `hello` | `[]` at install | `{peer, up?}` or `{terminal: {code}}` |
+| `presence` | `[wholeObject]`, coalesced to one send per 34 ms, re-sent every 20 s as keepalive and within 500 ms when an unknown peer appears | ignored |
+| `emit` | `[topic, data]`; client token bucket 80 burst / 40 per s, over-budget moments are silently dropped | `undefined` or `not_permitted` |
+| `sendToClaudeSession` | `[data, {deliver: "stage" \| "send"}]` posted with `includeUserActivation` (undocumented second argument) | `{to}` |
+| `canSendToClaudeSession` | `[]` | string, else `"off"` (`"writers_only"` also seen shell-side) |
+
+Push channel `__frame_room_ev {ev}` with `ev.arm`:
+
+| arm | fields | frame effect |
+|---|---|---|
+| `presence` | `peer, p, by?, isMe?, kind?, sameTab?` | merge; identical content keeps object identity so `updatedAt` holds |
+| `event` | `topic, peer, by?, isMe?, sameTab?, kind?, d` | deliver frozen `Message` to `on(topic)` listeners; the sender's own tab must receive its echo with `isMe: true, sameTab: true` |
+| `gone` | `peer` | remove peer |
+| `conn` | `up` | toggle `connected()`; `up: true` re-posts presence and, if `hello` failed, retries it |
+| `revoked` | `code?` | terminal: all listeners get one `onError`, peers collapse to self, `emit`/`presence` reject; the send-to-Claude pair keeps working |
+
+The frame sweeps peers unseen for 150 s every 15 s and batches `onPeers`
+deliveries per animation frame. The `ToClaude` validator is strict (4 KiB,
+depth 8, 64 keys/entries, identifier keys, format-character rules with emoji
+joiner exceptions) and runs entirely in the frame.
 
 ## 9. `comments` and the comment-mode overlay
 
