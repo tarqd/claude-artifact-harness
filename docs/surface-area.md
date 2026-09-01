@@ -296,12 +296,51 @@ ids are 20 base-36 characters. A `revoked` event kills every subscription.
 
 ## 6. `artifact` (self-publish and live docs)
 
-See `reference/contract/0.2.32/artifact.d.ts` for the page-facing API. The
-wire-level analysis of the 89 KB module is in progress and will be folded in
-here: publish (html and files forms), `edit(ops)` on live docs, `sync(fn)`,
-and the DOM capture machinery (`artifact-sync`, `artifact-local`,
-`data-local-*`, lanes and budgets, `claude:edit` / `claude:sync-off` /
-`claude:sync-lost` / `claude:sync-dropped` events).
+Page API per `reference/contract/0.2.32/artifact.d.ts`. Full wire analysis
+in `docs/analysis/artifact.md`. The same namespace object is mounted as
+`artifact` and `self`, with exactly three members: `publish`, `edit`,
+`sync`. Roughly 85 of the module's 89 KB is the live-doc DOM sync engine;
+the publish path itself is tiny.
+
+Config and gates:
+
+- `capabilities.artifact.config` (or `self.config`) equal to `{kind: "live_doc"}` switches the page into live-doc mode: `<body>` is adopted as the sync region (`<body artifact-sync="">`), the replica handshake is posted, and `edit`/`sync` work.
+- `flags` containing `artifact_files` enables the files form of `publish`; otherwise it rejects `capability_disabled` "publishing files is not available in this view".
+- `changes` containing `artifact-sync-reject` makes `edit`/`sync` reject `invalid_content` on a classic page with no `artifact-sync` region.
+
+Wire (cap `artifact`, ids `s<n>`, 130 s timeout):
+
+| Direction | Message |
+|---|---|
+| → | `method: "publish"`, `args: [html]` (no client-side doctype or size check) or `args: [{path: null \| {content: string \| Blob, contentType}}]` after local validation (≤ 256 paths, bare media type, extension table for inference) |
+| → | `method: "edit"`, `args: [ops]`; ops are forwarded untouched. The engine also uses undocumented op forms: `set-text` may carry `base`, and `set-html {target, tag, html}` is used when the pairing `caps` include `"html"` |
+| ← | `__frame_cap_r {id, result: {version}}` or `{seq, created}`; errors verbatim (`{code, message, live?}`) |
+| → | `__frame_morph_ready {arms: ["move"]}` at load; `__frame_replica_ready` on live docs |
+| ← | `__frame_morph {seq, elements[1..64]}` and `__frame_patch {seq, elements}`: co-writer edits applied in place (attrs, text, `create`, `remove`, `move`), then `claude:edit` dispatched; a failed apply posts `__frame_patch_miss {seq, reason?}` |
+| ← | `__frame_replica_pair {seq, nodes, caps?}`: the server's node tree (ids `^[^\0]{1,200}:[0-9]{1,18}$`) is paired against the live DOM; reply `__frame_replica_paired {seq, ok, reason?}`. `__frame_replica_pair_subtree {target, node}` re-pairs one subtree and stamps `data-id`s |
+| ← | `__frame_replica_patches {seq, patches}`: exact patches (`text` with code-point offsets, `set-attr`, `del-attr`, `remove`, `insert` with optional subtree; `reset`/`value`/`retag` refused) |
+| → | `__frame_local_edit {ops: [set-text \| set-html]}`: 60 ms debounced live preview of in-progress typing when `caps` include `"stage"` |
+| ← | `__ft_cmd {action: "translate"}` disables sync with reason `translated` |
+| ← / → | `__frame_diag_reveal {id}` (scroll and outline an element for 1 s) and `__frame_diag_probe {id}` → `__frame_diag {…stats}` |
+
+Engine behaviour a compatible host must honour (details in the analysis):
+
+- `MutationObserver` on the whole document with attribute and character data old values. Only mutations inside a gesture window (trusted discrete event, pointer held, or inside `sync(fn)`) are captured. Lanes: `discrete` writes go out at once; `default` attribute writes coalesce 1.5 s and are budgeted to 60 per element per minute; no `continuous` or `idle` lane exists yet.
+- Batches of at most 32 ops through `edit`, ordered `set-html`, `remove`, `create-element`, `set-attr`/`del-attr`, `set-text`. `EditResult.created` supplies ids for created elements in op order.
+- Retry policy: `rate_limited` sleeps 1.5 to 3 s; `conflict` retries up to 3 times; lifecycle codes (`not_writer`, `not_granted`, `not_declared`, `capability_disabled`, `capability_removed`, `consent_required`) disable the engine for the page; `invalid_content` drops the batch and fires `claude:sync-dropped`; anything else keeps the changes with exponential backoff (2 s doubling to 30 s) and fires `claude:sync-lost`.
+- Server ids must match `^[A-Za-z0-9_-]{1,64}$` and be unique document-wide.
+- Secrets: `value`/`checked` are never journaled for password/hidden/file inputs, `cc-*` / `one-time-code` / password autocompletes, or `:autofill`; secret ids persist in `sessionStorage` under `__artifact_sync_secret_ids`.
+- Script-built elements (unstamped descendants in a sync region with no gesture behind them) switch their nearest stamped ancestor off: `artifact-sync-state="off"`, custom state `:state(off)`, bubbling `claude:sync-off {why}`.
+- Injected style on arm: `artifact-sync,artifact-local{display:contents}`. Custom elements `artifact-sync` and `artifact-local` are defined with a `saving` getter.
+
+Page-facing events:
+
+| Event | Target | detail |
+|---|---|---|
+| `claude:edit` | `document` | `{seq, targets: string[]}` |
+| `claude:sync-off` | the element (bubbles) | `{why: "script-built" \| "pasted" \| "classic" \| "translated" \| lifecycle code}` |
+| `claude:sync-lost` | `document` | `{code, count}` |
+| `claude:sync-dropped` | `document` | `{reason: "invalid_content", count, targets}` or `{reason: "script_built" \| "mixed", count, ...}` |
 
 ## 7. `sample` (ask Claude)
 
@@ -376,8 +415,65 @@ joiner exceptions) and runs entirely in the frame.
 
 ## 9. `comments` and the comment-mode overlay
 
-Undocumented in the type definitions; analysis of `comments.js`,
-`_comments.js` and `_translate.js` pending.
+Undocumented in the type definitions. Full analysis in
+`docs/analysis/comments-translate.md`.
+
+### 9.1 `comments` capability (page-facing)
+
+Config `capabilities.comments.config`: `{customAnchors?: true, composer_only?: true, headless?: true}`.
+RPC ids `k<n>`, 130 s timeout, `__frame_cap_ack` extends to 900 s (a
+prompt is up). Members:
+
+| Member | Wire | Notes |
+|---|---|---|
+| `create(a)`, `reply(a, b)`, `resolve(a, b)`, `delete(a)`, `sendToClaude(a)`, `canSendToClaude()` | same-named method, args passed through | No client-side validation; result shapes come from the shell broker (see analysis §1.9 for the REST layer behind it) |
+| `openComposer({element} \| {range})` | `openComposer [{path, x, y, pin, sig?, doc?, rect, span?}]` | `[data-uncommentable]` ancestors resolve `{opened: false}` locally |
+| `anchorFor(el)` | local | `{path: cssPath(el), x, y}` normalized 0..1 |
+| `customAnchors({mode, threads, reveal, composing?})` | `__fc_ca {on, reg}` plus callbacks driven by `__fc_mode`, `__fc_threads`, `__fc_reveal` | Only with `config.customAnchors`; returns a handle with `compose`, `open`, `placed`, `domAnchor`, `exitMode`, `release`, `areas` |
+
+Anchor model: `path` is a CSS path of at most 10 segments (`#id` ≤ 32
+chars or unique `[data-id]` terminate it early; else `tag:nth-of-type(n)`),
+`sig` is `{v: 1, tag, h?}` where `h` is a 64-bit simhash of the first
+4096 chars of text (4-gram FNV-1a, Hamming ≤ 20 to match), `doc` is a
+document-pixel fallback, `span` is `{start, quote}` with a UTF-16 offset and
+a quote ≤ 512 bytes, and `pin` is a fraction inside the element's rect.
+Thread ids handed to pages are aliases `ca-<n>`, never real ids.
+
+### 9.2 Comment mode overlay (`_comments.js`, lazy on first `__fc_mode`)
+
+It injects **no visible UI**. It changes the cursor, suppresses clicks while
+mode is on, hit-tests, and reports viewport rects; the parent draws every
+pin, highlight, marquee, composer, and card. Messages:
+
+| Direction | Key | Payload |
+|---|---|---|
+| ← | `__fc_mode` | `{on, composing?, labels?, regions?, cursor?}` |
+| ← | `__fc_locate` | `{paths ≤128, sigs, docs, spans ≤128, labels?, regions?, cursor?}`, polled every 500 ms and on resize |
+| → | `__fc_rects` | `{rects: {[path]: rect \| null, ["doc:"+path]?}, spans: {[id]: {mode: "exact" \| "requote" \| "element", rects}}, labels?}` |
+| → | `__fc_hover` | `null` or `{rect, kind?, radii? \| caret?}` |
+| → | `__fc_click` | `{path, file?, x, y, pin?, sig?, label?, doc, rect, span?, region?, corner?, bg?, blocked?}` |
+| → / ← | `__fc_marquee` / `__fc_region` | drag rectangle in progress / a drag finished over the parent chrome |
+| ← | `__fc_reveal` | `{path, span?}` scrolls the anchor into view |
+| → / ← | `__fc_doc` / `__fc_goto` | `{file}` for multi-file artifacts under `/_f/<token>/` |
+| → | `__fc_escape` | `true` |
+
+Persistence behind the broker (from the shell bundle): `GET/POST
+/api/frame/comments/{frameUuid}?org=…` with `{text, anchor?, to_claude?,
+presence?}`, plus `/{threadId}` (reply), `/resolve {resolved}`, `/delete`,
+`/activate {activated}`, `/{threadId}/{commentId}/edit {text}`. Public
+readers also get thread data from `/_f/<ver>/index.html.json?__frame_t=<token>`.
+
+### 9.3 Translation (`_translate.js`, lazy on first `__ft_cmd`)
+
+- ← `__ft_cmd {action: "probe" \| "translate" \| "revert", target?: BCP-47, engineHost?: boolean}`
+- → `__ft_status {state: "idle" \| "translated" \| "translating" \| "downloading" \| "reverted" \| "error", lang?, usable?, progress?, error?}`
+- → `__ft_xl {id, texts}` / ← `__ft_xlr {id, texts? \| error?}` when the parent runs the translation engine.
+
+Collects text nodes outside `script style noscript textarea iframe`,
+`translate="no"`, and `.notranslate code pre kbd samp var`. Uses the
+browser's built-in `LanguageDetector` and `Translator` APIs (Chrome) in the
+frame or the parent, replaces `node.data` in place, and rewrites `lang` and
+`dir`. Also tells the artifact sync engine to stand down (`translated`).
 
 ---
 
