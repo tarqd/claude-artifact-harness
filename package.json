@@ -1,0 +1,33 @@
+{
+  "name": "claude-artifact-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted shell and frame runtime for Claude Artifacts (contract 0.2.32)",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && tsx scripts/build.ts",
+    "dev": "tsx scripts/build.ts && tsx watch src/server/main.ts",
+    "start": "tsx src/server/main.ts",
+    "publish": "tsx scripts/publish.ts",
+    "test": "vitest run",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
+    "@hono/node-server": "^1.19.6",
+    "hono": "^4.10.3",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^22.18.11",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.25.12",
+    "tsx": "^4.20.7",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

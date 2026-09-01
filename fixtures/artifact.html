@@ -1,0 +1,78 @@
+<main>
+  <h1>Artifact spine fixture</h1>
+  <p id="ns" data-state="pending" data-artifact="?" data-db="?" data-self="?" data-same="?">resolving&hellip;</p>
+  <p>count: <span id="count" data-count="0">0</span></p>
+  <button id="publish" type="button">Publish</button>
+  <p id="status" data-state="idle">idle</p>
+</main>
+<script id="app-script">
+(function () {
+  var countEl = document.getElementById('count');
+  var nsEl = document.getElementById('ns');
+  var statusEl = document.getElementById('status');
+  var button = document.getElementById('publish');
+  var count = Number(countEl.getAttribute('data-count') || '0');
+  var artifactNs = null;
+
+  function page(next) {
+    var script = document.getElementById('app-script').textContent;
+    return '<!doctype html><html><head><meta charset="utf-8">' +
+      '<title>Artifact spine fixture</title></head><body>' +
+      '<main>' +
+      '<h1>Artifact spine fixture</h1>' +
+      '<p id="ns" data-state="pending" data-artifact="?" data-db="?" data-self="?" data-same="?">resolving&hellip;</p>' +
+      '<p>count: <span id="count" data-count="' + next + '">' + next + '</span></p>' +
+      '<button id="publish" type="button">Publish</button>' +
+      '<p id="status" data-state="idle">idle</p>' +
+      '</main>' +
+      '<script id="app-script">' + script + '<' + '/script>' +
+      '</body></html>';
+  }
+
+  if (!window.claude || typeof window.claude.use !== 'function') {
+    nsEl.setAttribute('data-state', 'absent');
+    nsEl.textContent = 'window.claude is not present (inert copy)';
+    return;
+  }
+
+  Promise.all([
+    window.claude.use('artifact'),
+    window.claude.use('db'),
+    window.claude.use('self')
+  ]).then(function (resolved) {
+    artifactNs = resolved[0];
+    var db = resolved[1];
+    var self = resolved[2];
+    nsEl.setAttribute('data-artifact', artifactNs ? 'yes' : 'no');
+    nsEl.setAttribute('data-db', db ? 'yes' : 'no');
+    nsEl.setAttribute('data-self', self ? 'yes' : 'no');
+    nsEl.setAttribute('data-frozen', artifactNs && Object.isFrozen(artifactNs) ? 'yes' : 'no');
+    nsEl.setAttribute('data-same', artifactNs && artifactNs === self ? 'yes' : 'no');
+    nsEl.setAttribute('data-state', 'resolved');
+    nsEl.textContent =
+      'artifact:' + (artifactNs ? 'yes' : 'no') +
+      ' self:' + (self ? 'yes' : 'no') +
+      ' db:' + (db ? 'yes' : 'no');
+  });
+
+  button.addEventListener('click', function () {
+    if (!artifactNs) {
+      statusEl.setAttribute('data-state', 'unavailable');
+      statusEl.textContent = 'artifact is unavailable';
+      return;
+    }
+    statusEl.setAttribute('data-state', 'publishing');
+    statusEl.textContent = 'publishing';
+    artifactNs.publish(page(count + 1)).then(
+      function (result) {
+        statusEl.setAttribute('data-state', 'published');
+        statusEl.textContent = 'published ' + result.version;
+      },
+      function (error) {
+        statusEl.setAttribute('data-state', 'error');
+        statusEl.textContent = 'error ' + (error && error.code);
+      }
+    );
+  });
+})();
+</script>

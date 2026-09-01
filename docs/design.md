@@ -110,6 +110,19 @@ Admin API on the shell origin for tooling: `POST /api/artifacts` (create from HT
 
 `@anthropic-ai/sdk` with `ANTHROPIC_API_KEY`. Tiers: `quick` → `claude-haiku-4-5-20251001`, `default` → `claude-sonnet-5`, `complex` → `claude-opus-5`. Streaming over SSE to the shell; the shell forwards deltas as `__frame_cap_p {p: {type: "text", text: <delta>}}`; page tools become Anthropic `tools` and each `tool_use` block becomes `__frame_cap_p {p: {type: "tool_use", calls}}` awaiting `toolResults`. Consent: the shell asks once per artifact per viewer (persisted in the shell's localStorage) and sends `__frame_cap_ack` while the dialog is open. Answers are cached shell-side for 5 minutes by `(input, modelTier, images hash, verb)`. Legacy `window.claude.complete(prompt)` is provided by the preamble as a wrapper over `sample`.
 
+## Decisions made while building the spine
+
+- `src/frame/index.ts` is the compile-time surface a capability module imports (`createRpc`, `FrameContext`); the module loader lives in the preamble because runtime modules are separate ESM bundles fetched from `/_runtime/<name>.js`.
+- Version identity: the boot record carries the running version; the shell polls `GET /api/artifacts/:id/version` every `VERSION_POLL_MS` (5 s) and reloads other views. A websocket lane may replace the poll later.
+- Doctype rule: `publish(html)` from a page must be a full document; the admin API and CLI publish body content that the envelope wraps (`PublishInput.requireDoctype`).
+- `artifact_files` flag is set when the viewer can edit.
+- The creating viewer is recorded as `meta.owner`, so a dev box without `ARTIFACT_OWNER_TOKEN` still has a real owner per artifact.
+- CSP on the frame origin adds `default-src 'none'`, `form-action 'none'`, `base-uri 'self'` beyond the documented allowlist, so nested iframes and blob workers are blocked until proven needed.
+- `self` is accepted as a declaration name and normalized to `artifact` before `__frame_init`.
+- Security posture: `canEdit` is owner or admin only; the admin API requires the owner cookie, `Authorization: Bearer <ARTIFACT_OWNER_TOKEN>`, or `ARTIFACT_OPEN_ADMIN=1`; both servers bind `127.0.0.1` unless `BIND_HOST` is set. A forged, expired, or wrong-artifact `__frame_t` is a 403; no token is an anonymous viewer. The resolved viewer is exposed to slice routes as the Hono variable `frameViewer`.
+- RPC id prefixes are owned by `src/protocol/capabilities.ts` (`CAP_ID_PREFIXES`); `createRpc` derives them from the cap name, and `RpcOptions.onTimeout` lets a slice choose its timeout outcome.
+- One `BrokerContext` per mounted view; brokers may export `dispose`.
+
 ## Testing bar
 
 - Unit tests per slice with vitest (path grammar, validation, broker mapping, store behaviour).
