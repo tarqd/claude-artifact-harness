@@ -103,13 +103,15 @@ artifact's consent state, and there is no per-account storage to serve.
    rather than `"granted"`, because no module mounts for it and `use()` on it
    resolves `null`.
 5. **`sample` and `mcp` read `"prompt"`.** `mcp` is decided per declared
-   server under the scoped names `mcp:<server>`, stored where the `mcp`
-   slice's own dialog stores them (`consent:<artifactId>:mcp:<server>`); a
-   server the manifest does not declare is `"unavailable"`. The bare `mcp`
-   is the aggregate: `"prompt"` while any server is undecided, else
-   `"denied"` if any was refused, else `"granted"`, and `request(["mcp"])`
-   asks for every server in turn. `stateMap` lists both. `CONSENT_CAPS` in
-   `protocol.ts` is the one place to extend.
+   server under the scoped names `mcp:<server>`, through the same
+   `consent.ts` the `mcp` slice's own dialog uses (one dialog per key, one
+   at a time, one stored answer, with or without `localStorage`); a server
+   the manifest does not declare, or a `host:` one this surface cannot
+   reach, is `"unavailable"`. The bare `mcp` is the aggregate over the
+   askable servers: `"prompt"` while any is undecided, else `"denied"` if
+   any was refused, else `"granted"`, and `request(["mcp"])` asks for every
+   server in turn. `stateMap` lists both. A name the prompt cap kept from
+   being asked stays `"prompt"`: nothing was decided.
 6. **Validation code.** A bad name or an over-long list rejects
    `bad_request` with a plain message, the code the platform's own
    permissions module uses ("state takes no arguments or one capability

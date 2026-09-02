@@ -298,11 +298,13 @@ export interface CachePolicy {
   read: boolean;
   /** Store a successful result (and feed watchers of the identity). */
   write: boolean;
+  /** "Invalidate then call": skip the read and any execution already in flight. */
+  refresh: boolean;
   staleTime: number;
   gcTime: number;
 }
 
-const UNCACHED: CachePolicy = Object.freeze({ read: false, write: false, staleTime: 0, gcTime: 0 });
+const UNCACHED: CachePolicy = Object.freeze({ read: false, write: false, refresh: false, staleTime: 0, gcTime: 0 });
 
 /**
  * mcp.d.ts `CallToolOptions.cache`: a wire-explicit `readOnlyHint: false` is
@@ -316,13 +318,14 @@ export function resolveCachePolicy(option: CacheOption, readOnlyHint: boolean | 
   if (option === false) return UNCACHED;
   if (option === undefined) {
     return readOnlyHint === true
-      ? { read: true, write: true, staleTime: 0, gcTime: DEFAULT_GC_TIME_MS }
+      ? { read: true, write: true, refresh: false, staleTime: 0, gcTime: DEFAULT_GC_TIME_MS }
       : UNCACHED;
   }
   const gcTime = option.gcTime === undefined ? DEFAULT_GC_TIME_MS : Math.min(option.gcTime, MAX_GC_TIME_MS);
   if (gcTime <= 0) return UNCACHED;
   const staleTime = Math.max(0, Math.min(option.staleTime ?? 0, MAX_STALE_TIME_MS));
-  return { read: option.refresh !== true, write: true, staleTime, gcTime };
+  const refresh = option.refresh === true;
+  return { read: !refresh, write: true, refresh, staleTime, gcTime };
 }
 
 /** `watchTool`'s `refetchInterval`: absent means no polling; else ≥ 30 s. */

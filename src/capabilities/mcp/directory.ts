@@ -18,7 +18,7 @@
  * from a fresh execution.
  */
 import { readFileSync } from "node:fs";
-import { mcpError, type McpError, type ToolInfo } from "./protocol.ts";
+import { mcpError, type ToolInfo } from "./protocol.ts";
 
 /** A tool result as the connector produced it (content, structured output, failure flag). */
 export interface RawCallResult {
@@ -110,12 +110,26 @@ export function parseServersConfig(value: unknown): McpServerConfig[] {
   return out;
 }
 
+/**
+ * Parse configuration JSON without quoting it back: the text can carry a
+ * credential, and `JSON.parse`'s own message embeds a snippet of the input.
+ */
+function parseJson(text: string, what: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error(`${what} is not valid JSON`);
+  }
+}
+
 /** `MCP_SERVERS` (inline JSON), else `MCP_SERVERS_FILE` (a path), else nothing. */
 export function readServersFromEnv(env: NodeJS.ProcessEnv = process.env): McpServerConfig[] {
   const inline = env.MCP_SERVERS;
-  if (inline && inline.trim() !== "") return parseServersConfig(JSON.parse(inline));
+  if (inline && inline.trim() !== "") return parseServersConfig(parseJson(inline, "MCP_SERVERS"));
   const file = env.MCP_SERVERS_FILE;
-  if (file && file.trim() !== "") return parseServersConfig(JSON.parse(readFileSync(file, "utf8")));
+  if (file && file.trim() !== "") {
+    return parseServersConfig(parseJson(readFileSync(file, "utf8"), "MCP_SERVERS_FILE"));
+  }
   return [];
 }
 
@@ -294,7 +308,3 @@ export function selectDirectory(
   return configDirectory(servers, factory());
 }
 
-/** The error every connector method may throw: an McpError, kept as-is by the route. */
-export function isMcpErrorLike(err: unknown): err is McpError {
-  return isRecord(err) && typeof err.code === "string" && typeof err.message === "string";
-}

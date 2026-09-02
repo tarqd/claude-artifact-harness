@@ -14,6 +14,8 @@ import {
   setMcpBrokerEnv,
 } from "../../src/capabilities/mcp/broker.ts";
 import { serverConsentKey } from "../../src/capabilities/mcp/protocol.ts";
+import { resetConsentForTest } from "../../src/capabilities/permissions/consent.ts";
+import { handle as permissionsHandle } from "../../src/capabilities/permissions/broker.ts";
 
 const ARTIFACT = "artmcp000000000000000001";
 
@@ -224,6 +226,7 @@ let storage: Map<string, string>;
 
 beforeEach(() => {
   resetMcpBrokerState();
+  resetConsentForTest();
   clock = 1_000_000;
   timers = [];
   hidden = false;
@@ -326,6 +329,39 @@ describe("consent", () => {
     expect(ctx.asked.map((a) => a.title)).toEqual(["Let this artifact use Fake Tools?", "Let this artifact use No Store?"]);
   });
 
+  it("shares one dialog and one answer with permissions.request", async () => {
+    const ctx = { ...context(), boot: { ...boot(), capabilities: { mcp: { config: MANIFEST }, permissions: { config: {} } } } } as Ctx;
+    const asked = permissionsHandle(
+      { cap: "permissions", id: "q1", method: "request", args: [["mcp:Fake Tools"]] },
+      ctx,
+    );
+    const called = handle(call("callTool", ["Fake Tools", "echo", {}]), ctx);
+    expect(await asked).toEqual({ "mcp:Fake Tools": "granted" });
+    await called;
+    expect(ctx.asked).toHaveLength(1);
+    expect(storage.get(serverConsentKey(ARTIFACT, "Fake Tools"))).toBe("granted");
+  });
+
+  it("asks one server at a time when a page calls several at once", async () => {
+    let open = 0;
+    let peak = 0;
+    const ctx = context({
+      consent: vi.fn(async () => {
+        open++;
+        peak = Math.max(peak, open);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        open--;
+        return true;
+      }),
+    });
+    await Promise.all([
+      handle(call("callTool", ["Fake Tools", "echo", {}]), ctx),
+      handle(call("callTool", ["No Store", "echo", {}]), ctx),
+    ]);
+    expect(peak).toBe(1);
+    expect(ctx.consent).toHaveBeenCalledTimes(2);
+  });
+
   it("does not ask for listTools", async () => {
     const ctx = context();
     const listed = (await handle(call("listTools", []), ctx)) as Array<{ server: string }>;
@@ -391,6 +427,37 @@ describe("callTool and the cache", () => {
     await handle(call("callTool", ["No Store", "echo", {}, cached]), ctx);
     await handle(call("callTool", ["No Store", "echo", {}, cached]), ctx);
     expect(backend.calls).toBe(9);
+  });
+
+  it("gives a caller that joined a failing flight the full tool_error envelope", async () => {
+    const ctx = context();
+    backend.hold = true;
+    const a = rejection(handle(call("callTool", ["Fake Tools", "fail", {}, { cache: {} }]), ctx));
+    const b = rejection(handle(call("callTool", ["Fake Tools", "fail", {}, { cache: {} }]), ctx));
+    await settle();
+    backend.release();
+    // The creator resolves with the isError result (the frame converts it);
+    // the joiner rejects with the same envelope already converted.
+    await expect(a).rejects.toThrow();
+    await expect(b).resolves.toMatchObject({
+      code: "tool_error",
+      message: "failed #1",
+      result: { isError: true, content: [{ type: "text", text: "failed #1" }] },
+    });
+  });
+
+  it("refresh: true executes even while an identical call is in flight", async () => {
+    const ctx = context();
+    backend.hold = true;
+    const stale = handle(call("callTool", ["Fake Tools", "echo", {}]), ctx);
+    await settle();
+    const fresh = handle(call("callTool", ["Fake Tools", "echo", {}, { cache: { refresh: true } }]), ctx);
+    await settle();
+    expect(backend.bodies).toHaveLength(2);
+    backend.release();
+    const [first, second] = (await Promise.all([stale, fresh])) as Array<Record<string, unknown>>;
+    expect(first!.structuredContent).toEqual({ call: 1 });
+    expect(second!.structuredContent).toEqual({ call: 2 });
   });
 
   it("coalesces identical cached calls in flight into one execution", async () => {
@@ -575,10 +642,62 @@ describe("watchTool", () => {
     const ctx = context();
     await handle(call("watchTool", ["Fake Tools", "fail", null, { watchId: "f", refetchInterval: 30_000 }]), ctx);
     await settle();
-    expect(pushes(ctx, "f")).toEqual([{ type: "error", error: { code: "tool_error", message: "the tool reported an error", server: "Fake Tools", result: expect.objectContaining({ isError: true }) } }]);
+    expect(pushes(ctx, "f")).toEqual([{ type: "error", error: { code: "tool_error", message: "failed #1", server: "Fake Tools", result: expect.objectContaining({ isError: true }) } }]);
     advance(30_000);
     await settle();
     expect(pushes(ctx, "f")).toHaveLength(2);
+  });
+
+  it("delivers once to a watcher that joined another watcher's flight", async () => {
+    const ctx = context();
+    backend.hold = true;
+    await handle(call("watchTool", ["Fake Tools", "echo", { j: 1 }, { watchId: "a" }]), ctx);
+    await settle();
+    await handle(call("watchTool", ["Fake Tools", "echo", { j: 1 }, { watchId: "b" }]), ctx);
+    await settle();
+    expect(backend.bodies).toHaveLength(1);
+    backend.release();
+    await settle();
+    expect(pushes(ctx, "a")).toHaveLength(1);
+    expect(pushes(ctx, "b")).toHaveLength(1);
+    expect(pushes(ctx, "b")[0]).toMatchObject({ type: "data", result: { cache: { revalidating: false } } });
+  });
+
+  it("an unwatch that arrives while the registration is being decided wins", async () => {
+    const ctx = context();
+    const registering = handle(call("watchTool", ["Fake Tools", "echo", null, { watchId: "gone", refetchInterval: 30_000 }]), ctx);
+    await expect(handle(call("unwatchTool", ["gone"]), ctx)).resolves.toEqual({ ok: true });
+    await expect(registering).resolves.toEqual({ ok: true });
+    await settle();
+    expect(backend.calls).toBe(0);
+    expect(timers).toEqual([]);
+    advance(60_000);
+    await settle();
+    expect(backend.calls).toBe(0);
+    expect(pushes(ctx, "gone")).toEqual([]);
+    // The id is free again.
+    await handle(call("watchTool", ["Fake Tools", "echo", null, { watchId: "gone" }]), ctx);
+    await settle();
+    expect(backend.calls).toBe(1);
+  });
+
+  it("a view disposed during a registration keeps no watch", async () => {
+    const ctx = context();
+    const registering = handle(call("watchTool", ["Fake Tools", "echo", null, { watchId: "d", refetchInterval: 30_000 }]), ctx);
+    dispose(ctx);
+    await expect(registering).resolves.toEqual({ ok: true });
+    await settle();
+    advance(120_000);
+    await settle();
+    expect(backend.calls).toBe(0);
+    expect(timers).toEqual([]);
+  });
+
+  it("refuses a watch that asks not to keep its result", async () => {
+    const ctx = context();
+    await expect(rejection(handle(call("watchTool", ["Fake Tools", "echo", null, { watchId: "z", cache: { gcTime: 0 } }]), ctx))).resolves.toMatchObject({
+      code: "bad_request",
+    });
   });
 
   it("dispose releases every watch of the view", async () => {
@@ -628,6 +747,21 @@ describe("invalidate", () => {
     await handle(call("invalidate", []), ctx);
     await handle(call("callTool", ["Fake Tools", "plain", {}, cached]), ctx);
     expect(backend.calls).toBe(9);
+  });
+
+  it("does not let an execution that began before it answer a later call", async () => {
+    const ctx = context();
+    backend.hold = true;
+    const before = handle(call("callTool", ["Fake Tools", "echo", {}]), ctx);
+    await settle();
+    await handle(call("invalidate", ["Fake Tools", "echo"]), ctx);
+    const after = handle(call("callTool", ["Fake Tools", "echo", {}]), ctx);
+    await settle();
+    expect(backend.bodies).toHaveLength(2);
+    backend.release();
+    const [a, b] = (await Promise.all([before, after])) as Array<Record<string, unknown>>;
+    expect(a!.structuredContent).toEqual({ call: 1 });
+    expect(b!.structuredContent).toEqual({ call: 2 });
   });
 
   it("re-executes and delivers to a watched identity", async () => {

@@ -139,7 +139,14 @@ export function createClientPool(options: ClientPoolOptions = {}): ConnectorFact
       if (entry.client === client) entry.client = null;
     };
     client.onerror = () => undefined;
-    await client.connect(transportFor(entry.config, kind), { timeout: CONNECT_TIMEOUT_MS });
+    try {
+      await client.connect(transportFor(entry.config, kind), { timeout: CONNECT_TIMEOUT_MS });
+    } catch (err) {
+      // A transport that failed to start is not closed by the SDK; an SSE
+      // one would otherwise keep reconnecting on its own.
+      await client.close().catch(() => undefined);
+      throw err;
+    }
     return client;
   }
 
@@ -153,12 +160,11 @@ export function createClientPool(options: ClientPoolOptions = {}): ConnectorFact
         return await connectWith(entry, kind);
       } catch (err) {
         // A server that only speaks the legacy transport refuses the POST
-        // with a 4xx that is not an auth failure: try SSE once.
+        // with 404 or 405 (the Streamable HTTP spec's fallback rule): try
+        // SSE once. Any other status is the server's real answer.
         const status = httpStatus(err);
-        if (kind === "http" && entry.config.transport === undefined && status !== undefined) {
-          if (status >= 400 && status < 500 && status !== 401 && status !== 403) {
-            return await connectWith(entry, "sse");
-          }
+        if (kind === "http" && entry.config.transport === undefined && (status === 404 || status === 405)) {
+          return await connectWith(entry, "sse");
         }
         throw err;
       }
@@ -179,6 +185,20 @@ export function createClientPool(options: ClientPoolOptions = {}): ConnectorFact
     entry.client = null;
     entry.tools = null;
     if (client) void client.close().catch(() => undefined);
+  }
+
+  /**
+   * The one `Client` per server is shared by every viewer, so it is dropped
+   * only when the transport itself is gone — never for one request's
+   * timeout or HTTP status, which would fail everyone else's calls in
+   * flight. A lapsed credential also forgets the listing, so `listTools`
+   * stops reporting the connector as connected.
+   */
+  function afterFailure(entry: Entry, err: unknown, mapped: McpError): void {
+    const transportDead =
+      (err instanceof SdkMcpError && err.code === ErrorCode.ConnectionClosed) || isNetworkFailure(err);
+    if (transportDead) dropClient(entry);
+    else if (mapped.code === "needs_reauth") dropClient(entry);
   }
 
   function handle(config: McpServerConfig): ConnectorHandle {
@@ -204,7 +224,7 @@ export function createClientPool(options: ClientPoolOptions = {}): ConnectorFact
         return { authStatus: "authenticated", tools };
       } catch (err) {
         const mapped = mapUpstreamError(err, name);
-        if (mapped.code === "server_unavailable") dropClient(entry);
+        afterFailure(entry, err, mapped);
         if (mapped.code === "needs_reauth") return { authStatus: "auth_required", tools: [] };
         throw mapped;
       }
@@ -235,7 +255,7 @@ export function createClientPool(options: ClientPoolOptions = {}): ConnectorFact
         // The SDK reports an abort as a closed request, not an AbortError.
         if (signal.aborted) throw mcpError("cancelled", "the call was cancelled", { server: name });
         const mapped = mapUpstreamError(err, name);
-        if (mapped.code === "server_unavailable") dropClient(entry);
+        afterFailure(entry, err, mapped);
         throw mapped;
       }
     }

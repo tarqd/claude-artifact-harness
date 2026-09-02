@@ -290,8 +290,9 @@ describe("when the browser cannot persist", () => {
       );
     }
     expect(ctx.asked).toHaveLength(5);
-    // Past the cap the page is answered without the viewer being disturbed.
-    expect(outcomes.slice(5)).toEqual(new Array(3).fill('{"sample":"denied"}'));
+    // Past the cap the page is answered without the viewer being disturbed —
+    // and honestly: nobody was asked, so nothing was decided.
+    expect(outcomes.slice(5)).toEqual(new Array(3).fill('{"sample":"prompt"}'));
   });
 });
 
@@ -388,13 +389,13 @@ describe("mcp scoped names", () => {
   };
   const DECLARED = { permissions: { config: {} }, sample: { config: {} }, mcp: { config: MANIFEST } };
   const KEY = serverConsentKey(ARTIFACT, "Fake Tools");
-  const HOST_KEY = serverConsentKey(ARTIFACT, "host:filesystem");
   const request = (id: string, args: unknown[]) => ({ cap: "permissions", id, method: "request", args });
 
-  it("reads a declared server as prompt until decided, and an undeclared one as unavailable", () => {
+  it("reads a declared server as prompt until decided, and an undeclared or host: one as unavailable", () => {
     const ctx = context(DECLARED);
     expect(stateOf("mcp:Fake Tools", ctx)).toBe("prompt");
-    expect(stateOf("mcp:host:filesystem", ctx)).toBe("prompt");
+    // A device server is unreachable from this surface: nothing to consent to.
+    expect(stateOf("mcp:host:filesystem", ctx)).toBe("unavailable");
     expect(stateOf("mcp:Google Calendar", ctx)).toBe("unavailable");
     installStorage({ [KEY]: "granted" });
     expect(stateOf("mcp:Fake Tools", ctx)).toBe("granted");
@@ -402,28 +403,34 @@ describe("mcp scoped names", () => {
     expect(stateOf("mcp:Fake Tools", ctx)).toBe("denied");
   });
 
-  it("aggregates the bare name over the manifest", () => {
+  it("aggregates the bare name over the askable servers", () => {
     const ctx = context(DECLARED);
     expect(stateOf("mcp", ctx)).toBe("prompt");
     installStorage({ [KEY]: "granted" });
-    expect(stateOf("mcp", ctx)).toBe("prompt");
-    installStorage({ [KEY]: "granted", [HOST_KEY]: "denied" });
-    expect(stateOf("mcp", ctx)).toBe("denied");
-    installStorage({ [KEY]: "granted", [HOST_KEY]: "granted" });
     expect(stateOf("mcp", ctx)).toBe("granted");
+    installStorage({ [KEY]: "denied" });
+    expect(stateOf("mcp", ctx)).toBe("denied");
+    // Two askable servers: undecided outranks refused.
+    const two = context({
+      permissions: { config: {} },
+      mcp: { config: { servers: [{ server: "A", tools: ["t"] }, { server: "B", tools: ["t"] }] } },
+    });
+    installStorage({ [serverConsentKey(ARTIFACT, "A")]: "denied" });
+    expect(stateOf("mcp", two)).toBe("prompt");
+    installStorage({ [serverConsentKey(ARTIFACT, "A")]: "denied", [serverConsentKey(ARTIFACT, "B")]: "granted" });
+    expect(stateOf("mcp", two)).toBe("denied");
     // An empty manifest has nothing to decide.
     const empty = context({ permissions: { config: {} }, mcp: { config: { servers: [] } } });
     expect(stateOf("mcp", empty)).toBe("granted");
     expect(stateOf("mcp:Fake Tools", empty)).toBe("unavailable");
   });
 
-  it("lists the aggregate and every server in the map", () => {
+  it("lists the aggregate and every askable server in the map", () => {
     installStorage({ [KEY]: "granted" });
     expect(stateMap(context(DECLARED))).toEqual({
       sample: "prompt",
-      mcp: "prompt",
+      mcp: "granted",
       "mcp:Fake Tools": "granted",
-      "mcp:host:filesystem": "prompt",
     });
   });
 
@@ -433,29 +440,30 @@ describe("mcp scoped names", () => {
     expect(await handle(request("p1", [["mcp:Fake Tools"]]), ctx)).toEqual({ "mcp:Fake Tools": "granted" });
     expect(ctx.asked).toEqual([{ title: "Let this artifact use Fake Tools?", ackedFirst: true }]);
     expect(data.get(KEY)).toBe("granted");
-
+    // Everything askable is decided: nothing more to ask.
     expect(await handle(request("p2", [["mcp"]]), ctx)).toEqual({ mcp: "granted" });
-    expect(ctx.asked.map((a) => a.title)).toEqual([
-      "Let this artifact use Fake Tools?",
-      "Let this artifact use host:filesystem?",
-    ]);
-    expect(data.get(HOST_KEY)).toBe("granted");
+    expect(ctx.asked).toHaveLength(1);
+
+    const fresh = context({
+      permissions: { config: {} },
+      mcp: { config: { servers: [{ server: "A", tools: ["t"] }, { server: "B", tools: ["u", "v"] }] } },
+    });
+    expect(await handle(request("p3", [["mcp"]]), fresh)).toEqual({ mcp: "granted" });
+    expect(fresh.asked.map((a) => a.title)).toEqual(["Let this artifact use A?", "Let this artifact use B?"]);
   });
 
   it("a denied server makes the aggregate denied without re-asking", async () => {
-    const ctx = context(DECLARED, (n) => n === 3);
+    const ctx = context(DECLARED, (n) => n !== 2);
     expect(await handle(request("p1", []), ctx)).toEqual({
-      sample: "denied",
+      sample: "granted",
       mcp: "denied",
       "mcp:Fake Tools": "denied",
-      "mcp:host:filesystem": "granted",
     });
     expect(ctx.asked.map((a) => a.title)).toEqual([
       "Let this artifact ask Claude?",
       "Let this artifact use Fake Tools?",
-      "Let this artifact use host:filesystem?",
     ]);
     expect(await handle(request("p2", [["mcp"]]), ctx)).toEqual({ mcp: "denied" });
-    expect(ctx.asked).toHaveLength(3);
+    expect(ctx.asked).toHaveLength(2);
   });
 });

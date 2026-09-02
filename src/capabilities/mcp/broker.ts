@@ -11,10 +11,13 @@
  *
  * The cache lives here, in shell memory, per artifact and viewer — the
  * platform's is per viewer + artifact too, "cleared on logout", which a
- * page-scoped map gives for free.
+ * page-scoped map gives for free. Consent goes through the shared
+ * `permissions/consent.ts`, so `permissions.request("mcp:<server>")` and a
+ * first `callTool` are one question with one stored answer.
  */
 import { isCapError } from "../../protocol/errors.ts";
 import type { BrokerCall, BrokerContext, ConsentRequest } from "../../shell/types.ts";
+import { askOnce, readDecision } from "../permissions/consent.ts";
 import {
   DEFAULT_GC_TIME_MS,
   IDENTITY_SEPARATOR,
@@ -24,10 +27,12 @@ import {
   asMcpError,
   badRequest,
   callIdentity,
+  errorText,
   inManifest,
   isHostServer,
   manifestServer,
   mcpError,
+  normalizeResult,
   readCacheOption,
   readManifest,
   readRefetchInterval,
@@ -47,7 +52,12 @@ const MAX_CACHE_ENTRIES = 256;
 /** How long one `listTools` answer serves annotation lookups. */
 const TOOL_INFO_TTL_MS = 60_000;
 const SERVERS_TIMEOUT_MS = 65_000;
-const CALL_TIMEOUT_MS = 125_000;
+/**
+ * The whole of a `callTool` — the annotations lookup and the execution —
+ * fits under the 130 s reply budget the frame advertises, so the shell
+ * always answers before the frame gives up.
+ */
+const CALL_DEADLINE_MS = 125_000;
 
 /* ------------------------------- environment ------------------------------ */
 
@@ -128,6 +138,8 @@ interface Watch {
 interface ViewState {
   inflight: Map<string, AbortController>;
   watches: Map<string, Watch>;
+  /** Watch ids whose registration is still being decided. */
+  pending: Set<string>;
   stopVisibility: (() => void) | null;
 }
 
@@ -142,12 +154,8 @@ const cache = new Map<string, CacheEntry>();
 const executions = new Map<string, Promise<StoredResult>>();
 /** Watches by cache key, across every view, for delivery. */
 const watchers = new Map<string, Set<Watch>>();
-/** One consent dialog per server key, however many calls wait on it. */
-const consentInFlight = new Map<string, Promise<boolean>>();
 /** The last `listTools` answer per artifact and viewer, for annotations. */
 const toolInfo = new Map<string, ToolInfoCache>();
-/** Decisions this session could not persist (see permissions/broker.ts). */
-const remembered = new Map<string, string>();
 const views = new WeakMap<BrokerContext, ViewState>();
 
 /** Test seam: unit tests share a module registry, so they reset it. */
@@ -155,16 +163,14 @@ export function resetMcpBrokerState(): void {
   cache.clear();
   executions.clear();
   watchers.clear();
-  consentInFlight.clear();
   toolInfo.clear();
-  remembered.clear();
   env = browserEnv();
 }
 
 function viewState(ctx: BrokerContext): ViewState {
   let state = views.get(ctx);
   if (!state) {
-    state = { inflight: new Map(), watches: new Map(), stopVisibility: null };
+    state = { inflight: new Map(), watches: new Map(), pending: new Set(), stopVisibility: null };
     views.set(ctx, state);
   }
   return state;
@@ -204,25 +210,6 @@ function checkTarget(ctx: BrokerContext, server: string, tool: string): void {
 
 /* --------------------------------- consent -------------------------------- */
 
-function readStored(key: string): string | null {
-  try {
-    const stored = globalThis.localStorage?.getItem(key);
-    if (stored !== undefined && stored !== null) return stored;
-  } catch {
-    /* falls through to what this session remembers */
-  }
-  return remembered.get(key) ?? null;
-}
-
-function writeStored(key: string, value: string): void {
-  remembered.set(key, value);
-  try {
-    globalThis.localStorage?.setItem(key, value);
-  } catch {
-    /* private mode, or no storage at all: this session remembers it instead */
-  }
-}
-
 /** The dialog the viewer reads; shared with `permissions.request("mcp:<server>")`. */
 export function consentCopy(server: string, tools: readonly string[]): ConsentRequest {
   const list = tools.length > 0 ? tools.join(", ") : "its tools";
@@ -239,30 +226,16 @@ const NOT_GRANTED = (server: string): McpError =>
 
 async function ensureConsent(ctx: BrokerContext, callId: string, server: string): Promise<void> {
   const key = serverConsentKey(ctx.boot.artifactId, server);
-  const stored = readStored(key);
+  const stored = readDecision(key);
   if (stored === "granted") return;
   if (stored === "denied") throw NOT_GRANTED(server);
 
   // The frame's budget is extended while a viewer decides, and every call
   // that arrives meanwhile waits on the one dialog.
   ctx.ack(callId);
-  let dialog = consentInFlight.get(key);
-  if (!dialog) {
-    const tools = manifestServer(manifestOf(ctx), server)?.tools ?? [];
-    dialog = ctx
-      .consent(consentCopy(server, tools))
-      .then((granted) => {
-        // A decision that landed meanwhile (the permissions dialog for the
-        // same key) is the viewer's first answer; do not overwrite it.
-        const raced = readStored(key);
-        if (raced === "granted" || raced === "denied") return raced === "granted";
-        writeStored(key, granted ? "granted" : "denied");
-        return granted;
-      })
-      .finally(() => consentInFlight.delete(key));
-    consentInFlight.set(key, dialog);
-  }
-  if (!(await dialog)) throw NOT_GRANTED(server);
+  const tools = manifestServer(manifestOf(ctx), server)?.tools ?? [];
+  const decision = await askOnce(ctx, key, () => consentCopy(server, tools));
+  if (decision !== "granted") throw NOT_GRANTED(server);
 }
 
 /* --------------------------------- backend -------------------------------- */
@@ -285,7 +258,7 @@ async function backendError(response: Response): Promise<McpError> {
 
 function withTimeout(signal: AbortSignal | undefined, ms: number): { signal: AbortSignal; done(): void } {
   const controller = new AbortController();
-  const timer = env.setTimer(() => controller.abort(), ms);
+  const timer = env.setTimer(() => controller.abort(), Math.max(0, ms));
   const forward = (): void => controller.abort();
   if (signal) {
     if (signal.aborted) controller.abort();
@@ -331,13 +304,8 @@ interface ServersReply {
 }
 
 /** `POST /api/frame/mcp/servers`: the manifest intersected with what is connected. */
-async function fetchServers(ctx: BrokerContext, signal?: AbortSignal): Promise<ServersReply> {
-  const response = await postJson(
-    "/api/frame/mcp/servers",
-    { artifactId: ctx.boot.artifactId },
-    signal,
-    SERVERS_TIMEOUT_MS,
-  );
+async function fetchServers(ctx: BrokerContext, signal?: AbortSignal, ms = SERVERS_TIMEOUT_MS): Promise<ServersReply> {
+  const response = await postJson("/api/frame/mcp/servers", { artifactId: ctx.boot.artifactId }, signal, ms);
   if (!response.ok) throw await backendError(response);
   const body: unknown = await response.json().catch(() => null);
   const rows = isRecord(body) && Array.isArray(body.servers) ? body.servers : [];
@@ -369,10 +337,11 @@ async function annotationsFor(
   server: string,
   tool: string,
   signal: AbortSignal,
+  deadline: number,
 ): Promise<ToolAnnotations | undefined> {
   let info = toolInfo.get(scope(ctx));
   if (!info || env.now() - info.at > TOOL_INFO_TTL_MS) {
-    await fetchServers(ctx, signal);
+    await fetchServers(ctx, signal, Math.min(SERVERS_TIMEOUT_MS, deadline - env.now()));
     info = toolInfo.get(scope(ctx));
   }
   const tools = info?.servers.get(server);
@@ -391,12 +360,13 @@ async function callBackend(
   tool: string,
   input: unknown,
   signal: AbortSignal | undefined,
+  ms: number,
 ): Promise<{ raw: StoredResult; isError: boolean; noStore: boolean }> {
   const response = await postJson(
     "/api/frame/mcp/call",
     { artifactId: ctx.boot.artifactId, server, tool, input },
     signal,
-    CALL_TIMEOUT_MS,
+    ms,
   );
   if (!response.ok) throw await backendError(response);
   const body: unknown = await response.json().catch(() => null);
@@ -446,11 +416,25 @@ function asWire(raw: StoredResult, isError: boolean): Record<string, unknown> {
   return isError ? { ...raw, isError: true } : { ...raw };
 }
 
+/** The rejection a tool-level failure is for anyone who joined its flight. */
+function toolError(raw: StoredResult, server: string): McpError {
+  const wire = asWire(raw, true);
+  return mcpError("tool_error", errorText(normalizeResult(wire).result), { server, result: wire });
+}
+
+interface ExecutePolicy {
+  write: boolean;
+  gcTime: number;
+  /** Execute upstream even if an identical execution is in flight. */
+  refresh: boolean;
+}
+
 /**
  * Execute a call, sharing one flight with every identical cached call in
- * progress, storing a successful result when asked to and feeding the
- * watchers of the identity. `signal` cancels this caller's wait; a shared
- * flight runs on for the others.
+ * progress (unless the caller asked for a refresh), storing a successful
+ * result when asked to and feeding the watchers of the identity. `signal`
+ * cancels this caller's wait; a shared flight runs on for the others.
+ * `joined` says whether another flight answered.
  */
 async function execute(
   ctx: BrokerContext,
@@ -458,14 +442,16 @@ async function execute(
   server: string,
   tool: string,
   input: unknown,
-  policy: { write: boolean; gcTime: number },
+  policy: ExecutePolicy,
   signal: AbortSignal | undefined,
   origin: Watch | null,
-): Promise<Record<string, unknown>> {
-  let flight = policy.write ? executions.get(key) : undefined;
+  ms: number,
+): Promise<{ result: Record<string, unknown>; joined: boolean }> {
+  let flight = policy.write && !policy.refresh ? executions.get(key) : undefined;
+  const joined = flight !== undefined;
   let fresh: Promise<{ raw: StoredResult; isError: boolean }> | null = null;
   if (!flight) {
-    const run = callBackend(ctx, server, tool, input, policy.write ? undefined : signal).then(
+    const run = callBackend(ctx, server, tool, input, policy.write ? undefined : signal, ms).then(
       ({ raw, isError, noStore }) => {
         if (policy.write && !noStore && !isError) {
           const storedAt = env.now();
@@ -476,23 +462,24 @@ async function execute(
       },
     );
     if (policy.write) {
-      flight = run.then((outcome) => {
-        if (outcome.isError) throw mcpError("tool_error", "the tool reported an error", { server });
+      const shared: Promise<StoredResult> = run.then((outcome) => {
+        if (outcome.isError) throw toolError(outcome.raw, server);
         return outcome.raw;
       });
-      executions.set(key, flight);
+      executions.set(key, shared);
       // A shared flight's rejection reaches its own callers; the cleanup must
       // not turn it into an unhandled rejection of its own.
       const cleanup = (): void => {
-        if (executions.get(key) === flight) executions.delete(key);
+        if (executions.get(key) === shared) executions.delete(key);
       };
-      flight.then(cleanup, cleanup);
+      shared.then(cleanup, cleanup);
+      flight = shared;
     }
     fresh = run;
   }
   const outcome = fresh ?? (flight as Promise<StoredResult>).then((raw) => ({ raw, isError: false }));
   const settled = await raceWithSignal(outcome, signal);
-  return asWire(settled.raw, settled.isError);
+  return { result: asWire(settled.raw, settled.isError), joined };
 }
 
 function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -529,24 +516,29 @@ function notifyWatchers(key: string, raw: StoredResult, storedAt: number, except
   }
 }
 
-/** Execute for one watch: its own delivery is fresh, everyone else's is the stored copy. */
+/**
+ * Execute for one watch. Its own execution is delivered fresh, and everyone
+ * else's copy comes through `notifyWatchers`; a watch that joined another
+ * flight is one of those "everyone else", so it delivers nothing itself.
+ */
 async function refresh(watch: Watch): Promise<void> {
   try {
-    const result = await execute(
+    const { result, joined } = await execute(
       watch.ctx,
       watch.key,
       watch.server,
       watch.tool,
       watch.input,
-      { write: true, gcTime: watch.gcTime },
+      { write: true, gcTime: watch.gcTime, refresh: false },
       undefined,
       watch,
+      CALL_DEADLINE_MS,
     );
+    if (joined) return;
     if (result.isError === true) {
-      pushWatch(watch, {
-        type: "error",
-        error: mcpError("tool_error", "the tool reported an error", { server: watch.server, result }),
-      });
+      const raw: StoredResult = { content: Array.isArray(result.content) ? result.content : [] };
+      if (result.structuredContent !== undefined) raw.structuredContent = result.structuredContent;
+      pushWatch(watch, { type: "error", error: toolError(raw, watch.server) });
       return;
     }
     pushWatch(watch, { type: "data", result, server: watch.server });
@@ -640,7 +632,8 @@ async function handleCallTool(call: BrokerCall, ctx: BrokerContext): Promise<unk
     await ensureConsent(ctx, call.id, args.server);
     if (controller.signal.aborted) throw CANCELLED();
 
-    const annotations = await annotationsFor(ctx, args.server, args.tool, controller.signal);
+    const deadline = env.now() + CALL_DEADLINE_MS;
+    const annotations = await annotationsFor(ctx, args.server, args.tool, controller.signal, deadline);
     const policy = resolveCachePolicy(cacheOption, annotations?.readOnlyHint);
     const key = cacheKey(ctx, callIdentity(args.server, args.tool, args.input));
 
@@ -651,7 +644,18 @@ async function handleCallTool(call: BrokerCall, ctx: BrokerContext): Promise<unk
       }
     }
     if (controller.signal.aborted) throw CANCELLED();
-    return await execute(ctx, key, args.server, args.tool, args.input, policy, controller.signal, null);
+    const { result } = await execute(
+      ctx,
+      key,
+      args.server,
+      args.tool,
+      args.input,
+      { write: policy.write, gcTime: policy.gcTime, refresh: policy.refresh },
+      controller.signal,
+      null,
+      deadline - env.now(),
+    );
+    return result;
   } finally {
     state.inflight.delete(call.id);
   }
@@ -674,30 +678,43 @@ async function handleWatchTool(call: BrokerCall, ctx: BrokerContext): Promise<un
   }
   const cacheOption = readCacheOption(options.cache, "watch");
   if (cacheOption === false) throw badRequest("a watch cannot opt out of the cache");
+  if (cacheOption?.gcTime !== undefined && cacheOption.gcTime <= 0) {
+    throw badRequest("a watch keeps its result to replay it: cache.gcTime must be positive");
+  }
   const refetchInterval = readRefetchInterval(options.refetchInterval);
   checkTarget(ctx, args.server, args.tool);
 
   const state = viewState(ctx);
-  if (state.watches.has(watchId)) throw badRequest(`watch ${watchId} is already registered`);
-  if (state.watches.size >= MAX_WATCHES) {
+  if (state.watches.has(watchId) || state.pending.has(watchId)) {
+    throw badRequest(`watch ${watchId} is already registered`);
+  }
+  if (state.watches.size + state.pending.size >= MAX_WATCHES) {
     throw badRequest(`at most ${MAX_WATCHES} watches per view - unsubscribe unused watches`);
   }
-
-  await ensureConsent(ctx, call.id, args.server);
-  const annotations = await annotationsFor(ctx, args.server, args.tool, new AbortController().signal);
-  if (annotations?.readOnlyHint === false) {
-    throw badRequest(`watchTool watches reads only; ${args.tool} declares readOnlyHint: false`);
+  // Claimed before the first await, so an `unwatchTool` that arrives while
+  // the registration is being decided is not lost.
+  state.pending.add(watchId);
+  let live = true;
+  try {
+    await ensureConsent(ctx, call.id, args.server);
+    const annotations = await annotationsFor(
+      ctx,
+      args.server,
+      args.tool,
+      new AbortController().signal,
+      env.now() + CALL_DEADLINE_MS,
+    );
+    if (annotations?.readOnlyHint === false) {
+      throw badRequest(`watchTool watches reads only; ${args.tool} declares readOnlyHint: false`);
+    }
+  } finally {
+    // Unwatched, or the view disposed, while this was being decided.
+    live = state.pending.delete(watchId) && views.get(ctx) === state;
   }
-  // Re-check after the awaits: the view may have filled up meanwhile.
-  if (state.watches.has(watchId)) throw badRequest(`watch ${watchId} is already registered`);
-  if (state.watches.size >= MAX_WATCHES) {
-    throw badRequest(`at most ${MAX_WATCHES} watches per view - unsubscribe unused watches`);
-  }
+  if (!live) return { ok: true };
 
   const staleTime = Math.max(0, Math.min(cacheOption?.staleTime ?? 0, MAX_STALE_TIME_MS));
-  const requestedGc = cacheOption?.gcTime;
-  const gcTime =
-    requestedGc === undefined || requestedGc <= 0 ? DEFAULT_GC_TIME_MS : Math.min(requestedGc, MAX_GC_TIME_MS);
+  const gcTime = cacheOption?.gcTime === undefined ? DEFAULT_GC_TIME_MS : Math.min(cacheOption.gcTime, MAX_GC_TIME_MS);
   const key = cacheKey(ctx, callIdentity(args.server, args.tool, args.input));
   const watch: Watch = {
     watchId,
@@ -731,6 +748,7 @@ function handleUnwatch(call: BrokerCall, ctx: BrokerContext): unknown {
   const watchId = call.args[0];
   if (typeof watchId !== "string") throw badRequest("unwatchTool takes a watch id");
   const state = viewState(ctx);
+  state.pending.delete(watchId);
   const watch = state.watches.get(watchId);
   if (watch) removeWatch(state, watch);
   return { ok: true };
@@ -761,6 +779,11 @@ async function handleInvalidate(call: BrokerCall, ctx: BrokerContext): Promise<u
 
   for (const key of [...cache.keys()]) {
     if (matches(key)) cache.delete(key);
+  }
+  // An execution that started before the invalidation must not answer for
+  // it: later callers and the watch refreshes below start their own.
+  for (const key of [...executions.keys()]) {
+    if (matches(key)) executions.delete(key);
   }
   // Every watched identity in scope re-executes and delivers, in any view.
   for (const [key, set] of watchers) {
@@ -796,6 +819,7 @@ export function dispose(ctx: BrokerContext): void {
   if (!state) return;
   for (const controller of state.inflight.values()) controller.abort();
   state.inflight.clear();
+  state.pending.clear();
   for (const watch of [...state.watches.values()]) removeWatch(state, watch);
   views.delete(ctx);
 }

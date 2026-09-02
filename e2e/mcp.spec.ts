@@ -166,11 +166,11 @@ test("listTools, consent, the cache, refusals, cancellation and permissions", as
   // Abort: the page's signal cancels promptly.
   expect(await run(page, "call-cancel")).toMatchObject({ state: "error", code: "cancelled" });
 
-  // Permissions after the calls: the decided server reads granted; the
-  // aggregate is still waiting on host:local.
+  // Permissions after the calls: both askable servers are decided, and the
+  // host: server never counts (this surface cannot reach it).
   await frame(page).locator("#perm-read").click();
   await expect(perm).toHaveAttribute("data-scoped", "granted");
-  await expect(perm).toHaveAttribute("data-agg", "prompt");
+  await expect(perm).toHaveAttribute("data-agg", "granted");
   await frame(page).locator("#perm-request").click();
   await expect(perm).toHaveAttribute("data-requested", "granted");
   await expect(dialog).toHaveCount(0);
@@ -195,6 +195,7 @@ test("a watch replays the cache, hears invalidate, and stops on unsubscribe", as
 
   // A cached call of the same identity is served from the store: no new event.
   expect(await run(page, "call-echo")).toMatchObject({ state: "done", call: first, cached: "yes" });
+  await page.waitForTimeout(300);
   await expect(watch).toHaveAttribute("data-events", "1");
 
   // invalidate re-executes the watched identity and delivers.
@@ -203,8 +204,9 @@ test("a watch replays the cache, hears invalidate, and stops on unsubscribe", as
   const second = (await watch.getAttribute("data-last-call")) ?? "";
   expect(Number(second)).toBe(Number(first) + 1);
 
-  // A fresh cached call feeds the watcher too.
+  // A call that opted out of the cache does not feed the watcher.
   expect(await run(page, "call-echo-fresh")).toMatchObject({ state: "done", cached: "no" });
+  await page.waitForTimeout(300);
   if (!FOREIGN_RUNTIME) await expect(watch).toHaveAttribute("data-events", "2");
   await frame(page).locator("#k").fill("one");
   await frame(page).locator("#invalidate").click();

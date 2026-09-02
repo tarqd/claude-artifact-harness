@@ -168,6 +168,7 @@ describe("cache policy", () => {
     expect(resolveCachePolicy(undefined, true)).toEqual({
       read: true,
       write: true,
+      refresh: false,
       staleTime: 0,
       gcTime: DEFAULT_GC_TIME_MS,
     });
@@ -179,6 +180,7 @@ describe("cache policy", () => {
     expect(resolveCachePolicy({}, undefined)).toEqual({
       read: true,
       write: true,
+      refresh: false,
       staleTime: 0,
       gcTime: DEFAULT_GC_TIME_MS,
     });
@@ -189,7 +191,7 @@ describe("cache policy", () => {
     expect(resolveCachePolicy({ staleTime: -5 }, true).staleTime).toBe(0);
     expect(resolveCachePolicy({ gcTime: 2 * MAX_GC_TIME_MS }, true).gcTime).toBe(MAX_GC_TIME_MS);
     expect(resolveCachePolicy({ gcTime: 0 }, true)).toMatchObject({ read: false, write: false });
-    expect(resolveCachePolicy({ refresh: true }, true)).toMatchObject({ read: false, write: true });
+    expect(resolveCachePolicy({ refresh: true }, true)).toMatchObject({ read: false, write: true, refresh: true });
   });
 
   it("clamps refetchInterval to the 30 s floor", () => {

@@ -14,20 +14,22 @@
  *
  * `state()` never prompts. `request()` prompts once per undecided name: it
  * sends `__frame_cap_ack` first (which extends the frame's budget from 130 s
- * to 900 s), shows `ctx.consent`, and stores the answer under the same key
- * the `sample` slice reads, so a viewer is asked once per artifact whichever
- * surface asked. A stored `"denied"` is returned as-is and never re-prompts —
- * the same rule browsers apply to `Notification.requestPermission`, and the
- * reason a page cannot nag by looping on `request()`. When the browser cannot
- * persist at all the answer is remembered in memory for the life of the view,
- * and a hard cap of five dialogs per artifact per minute stops a page turning
- * an unstorable decision into a stream of modals over the shell.
+ * to 900 s), then asks through the shared `consent.ts`, which stores the
+ * answer under the same key the `sample` and `mcp` slices read, so a viewer
+ * is asked once per artifact whichever surface asked. A stored `"denied"` is
+ * returned as-is and never re-prompts — the same rule browsers apply to
+ * `Notification.requestPermission`, and the reason a page cannot nag by
+ * looping on `request()`. When the browser cannot persist at all the answer
+ * is remembered in memory for the life of the shell page, and a hard cap of
+ * five dialogs per artifact per minute stops a page turning an unstorable
+ * decision into a stream of modals over the shell.
  */
 import { CAPABILITY_DISABLED } from "../../protocol/errors.ts";
 import { resolveCapability } from "../../protocol/capabilities.ts";
 import type { BrokerCall, BrokerContext, ConsentRequest } from "../../shell/types.ts";
 import { consentCopy as mcpConsentCopy, manifestOf } from "../mcp/broker.ts";
-import { manifestServer, serverConsentKey } from "../mcp/protocol.ts";
+import { isHostServer, manifestServer, serverConsentKey } from "../mcp/protocol.ts";
+import { askOnce, readDecision, resetConsentForTest } from "./consent.ts";
 import {
   CAP,
   CONSENT_CAPS,
@@ -39,73 +41,6 @@ import {
   validateStateName,
   type PermissionState,
 } from "./protocol.ts";
-
-/* ------------------------------ stored answers ---------------------------- */
-
-/**
- * Decisions this session could not persist. `localStorage` throws in a
- * private window and is absent in some embeddings; without this the viewer
- * would be asked again on every single call, so an answer is at least
- * remembered for as long as the view is open.
- */
-const remembered = new Map<string, string>();
-
-function readStored(key: string): string | null {
-  try {
-    const stored = globalThis.localStorage?.getItem(key);
-    if (stored !== undefined && stored !== null) return stored;
-  } catch {
-    /* falls through to what this session remembers */
-  }
-  return remembered.get(key) ?? null;
-}
-
-function writeStored(key: string, value: string): void {
-  remembered.set(key, value);
-  try {
-    globalThis.localStorage?.setItem(key, value);
-  } catch {
-    /* private mode, or no storage at all: this session remembers it instead */
-  }
-}
-
-/** A stored answer, or `null` if the viewer has not decided this key yet. */
-function storedState(key: string): PermissionState | null {
-  const stored = readStored(key);
-  return stored === "granted" || stored === "denied" ? stored : null;
-}
-
-/**
- * One dialog per key, however many calls are waiting on it. Keyed by the
- * storage key, so two views of the same artifact in one page share it.
- */
-const consentInFlight = new Map<string, Promise<PermissionState>>();
-
-/* ------------------------------- prompt cap ------------------------------- */
-
-/**
- * A dialog makes the iframe inert and blocks the shell, so a page that can
- * keep reaching `"prompt"` (storage blocked, every answer refused) must not
- * be able to loop one up forever. Same shape as the `downloads` cap:
- * 5 per artifact per minute, then the last answer — or `"denied"`.
- */
-const MAX_PROMPTS_PER_WINDOW = 5;
-const PROMPT_WINDOW_MS = 60_000;
-const promptTimes = new Map<string, number[]>();
-
-function promptAllowed(artifactId: string): boolean {
-  const now = Date.now();
-  const recent = (promptTimes.get(artifactId) ?? []).filter(
-    (at) => now - at < PROMPT_WINDOW_MS,
-  );
-  if (recent.length >= MAX_PROMPTS_PER_WINDOW) {
-    promptTimes.set(artifactId, recent);
-    return false;
-  }
-  recent.push(now);
-  promptTimes.set(artifactId, recent);
-  return true;
-}
 
 /* ------------------------------- state rules ------------------------------ */
 
@@ -131,31 +66,40 @@ export function declaredNames(ctx: BrokerContext): Set<string> {
 
 /** The stored decision under `key`, or `"prompt"` when the viewer has not decided. */
 function decidedState(key: string): PermissionState {
-  const stored = readStored(key);
-  if (stored === "granted" || stored === "denied") return stored;
-  return "prompt";
+  return readDecision(key) ?? "prompt";
+}
+
+/**
+ * The servers a viewer can be asked about: the manifest minus `host:`
+ * entries, which name a server on the viewer's device that this surface
+ * cannot reach (the `mcp` slice omits them from `listTools()` and refuses
+ * every call), so there is nothing to consent to.
+ */
+function askableServers(ctx: BrokerContext): string[] {
+  return manifestOf(ctx)
+    .servers.map((entry) => entry.server)
+    .filter((server) => !isHostServer(server));
 }
 
 /**
  * `mcp` is decided per declared server. A scoped name answers for its
- * server (`"unavailable"` for one the manifest does not declare); the bare
- * name is the aggregate over the manifest: `"prompt"` while any server is
- * undecided, else `"denied"` if any was refused, else `"granted"` — which
- * is what "granted only when every declared server is covered" (mcp.d.ts)
- * comes to, and vacuously true of an empty manifest.
+ * server (`"unavailable"` for one the manifest does not declare, or a
+ * `host:` one); the bare name is the aggregate over the askable servers:
+ * `"prompt"` while any is undecided, else `"denied"` if any was refused,
+ * else `"granted"` — which is what "granted only when every declared server
+ * is covered" (mcp.d.ts) comes to, and vacuously true of an empty manifest.
  */
 function mcpState(name: string, ctx: BrokerContext): PermissionState {
-  const manifest = manifestOf(ctx);
   if (name === "mcp") {
-    const states = manifest.servers.map((entry) =>
-      decidedState(serverConsentKey(ctx.boot.artifactId, entry.server)),
+    const states = askableServers(ctx).map((server) =>
+      decidedState(serverConsentKey(ctx.boot.artifactId, server)),
     );
     if (states.includes("prompt")) return "prompt";
     if (states.includes("denied")) return "denied";
     return "granted";
   }
   const server = scopeOf(name);
-  if (!manifestServer(manifest, server)) return "unavailable";
+  if (isHostServer(server) || !manifestServer(manifestOf(ctx), server)) return "unavailable";
   return decidedState(serverConsentKey(ctx.boot.artifactId, server));
 }
 
@@ -184,8 +128,8 @@ export function stateMap(ctx: BrokerContext): Record<string, PermissionState> {
     if (declared === CAP) continue;
     out[declared] = stateOf(declared, ctx);
     if (declared === "mcp") {
-      for (const entry of manifestOf(ctx).servers) {
-        const scoped = `mcp:${entry.server}`;
+      for (const server of askableServers(ctx)) {
+        const scoped = `mcp:${server}`;
         out[scoped] = stateOf(scoped, ctx);
       }
     }
@@ -233,8 +177,8 @@ async function decide(
   // The bare `mcp` is the whole manifest: asking it asks for every server,
   // one dialog after another, and answers with the aggregate.
   if (normalized === "mcp") {
-    for (const entry of manifestOf(ctx).servers) {
-      await decide(`mcp:${entry.server}`, ctx, ack);
+    for (const server of askableServers(ctx)) {
+      await decide(`mcp:${server}`, ctx, ack);
     }
     return stateOf("mcp", ctx);
   }
@@ -246,31 +190,11 @@ async function decide(
   // the frame before it opens, so its 130 s budget becomes 900 s while
   // somebody reads the question.
   ack();
-
-  let dialog = consentInFlight.get(key);
-  if (!dialog) {
-    // Read the key again rather than trusting `stateOf`'s: a slice that keeps
-    // its own first-call dialog for the same key (`sample`) may have been
-    // answered while an earlier name in this same `request()` was decided.
-    const settled = storedState(key);
-    if (settled) return settled;
-    if (!promptAllowed(ctx.boot.artifactId)) return storedState(key) ?? "denied";
-    dialog = ctx
-      .consent(consentCopy(normalized, ctx))
-      .then((granted): PermissionState => {
-        // Same reason, one step later: a decision that landed while this
-        // dialog was open is the viewer's first answer, and a stale one must
-        // not overwrite it.
-        const raced = storedState(key);
-        if (raced) return raced;
-        const answer: PermissionState = granted ? "granted" : "denied";
-        writeStored(key, answer);
-        return answer;
-      })
-      .finally(() => consentInFlight.delete(key));
-    consentInFlight.set(key, dialog);
-  }
-  return await dialog;
+  // One dialog per key across every slice, one at a time, and the first
+  // answer stands (consent.ts). A viewer the prompt cap kept from being
+  // asked has decided nothing: the name still reads "prompt".
+  const decision = await askOnce(ctx, key, () => consentCopy(normalized, ctx));
+  return decision ?? "prompt";
 }
 
 /* -------------------------------- dispatch -------------------------------- */
@@ -302,9 +226,7 @@ export async function handle(call: BrokerCall, ctx: BrokerContext): Promise<unkn
   throw CAPABILITY_DISABLED(`${CAP}.${call.method}`);
 }
 
-/** Only for tests: the module-level maps outlive a single view. */
+/** Only for tests: the shared consent state outlives a single view. */
 export function resetForTest(): void {
-  consentInFlight.clear();
-  remembered.clear();
-  promptTimes.clear();
+  resetConsentForTest();
 }

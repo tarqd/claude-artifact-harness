@@ -54,13 +54,18 @@ MCP_SERVERS_FILE=./mcp-servers.json      # the same JSON, from a file
 MCP_BACKEND=fake
 ```
 
-Each entry is `{name, url, headers?, transport?, noStore?}`: `transport` is
-`http` (Streamable HTTP, the default — a server that refuses it with a 4xx
-gets one SSE attempt) or `sse`; `noStore: true` marks a server whose results
-the shell must never cache. A `host:` name is refused: those are reserved
-for servers on the viewer's device. A configuration that cannot be read
-throws at first use rather than silently serving nothing; no configuration
-at all is fine, and reads as "this viewer has no connectors".
+Each entry is `{name, url, headers?, transport?, noStore?}` (a `{servers:
+[...]}` wrapper is accepted too): `transport` is `http` (Streamable HTTP,
+the default — a server that answers the first POST with 404 or 405 gets one
+SSE attempt) or `sse`; `noStore: true` marks a server whose results the
+shell must never cache. A `host:` name is refused: those are reserved for
+servers on the viewer's device. `MCP_BACKEND=fake` takes precedence over
+`MCP_SERVERS`, which takes precedence over `MCP_SERVERS_FILE`. The
+configuration is read when the server starts, so one that cannot be parsed
+fails the start (with the offending text left out of the message — it may
+hold a credential); no configuration at all is fine, and reads as "this
+viewer has no connectors". Configured headers ride on every request to that
+server, redirects included; point a server at its final URL.
 
 `ConnectorDirectory.resolve(viewerId, displayName)` is the seam a per-viewer
 store would implement later: nothing in the broker, the routes or the frame
@@ -106,44 +111,67 @@ under `mcp`, frozen.
 2. **Device servers.** A `host:<name>` server → `server_not_connected`,
    exactly what the platform answers outside the Claude app.
 3. **Consent, per server.** `ctx.ack(id)` first, then one dialog naming the
-   server and the tools the manifest declares for it. The answer is stored
-   under `consent:<artifactId>:mcp:<server>`, the key the `permissions`
-   slice reads for `state("mcp:<server>")`, so whichever surface asks first
-   the other honours it. "Not now" is `not_granted` and is never asked again.
+   server and the tools the manifest declares for it, through the shared
+   `permissions/consent.ts`: one dialog per key however many callers wait,
+   one dialog at a time however many servers a page calls at once, and the
+   answer stored under `consent:<artifactId>:mcp:<server>` — the key
+   `permissions.state("mcp:<server>")` reads and `permissions.request()`
+   writes — so whichever surface asks first, the other honours it, with or
+   without `localStorage`. "Not now" is `not_granted` and is never asked
+   again; the prompt cap (five dialogs per artifact per minute) refuses a
+   call as `not_granted` without storing anything.
 4. **Policy.** The connector's own `readOnlyHint` (from a `listTools` the
-   broker keeps for a minute) decides the default: a declared read caches
-   with `staleTime: 0` and `gcTime: 5 min`; a declared write never caches,
+   broker keeps for a minute; the server's client pool keeps its own for a
+   minute too) decides the default: a declared read caches with
+   `staleTime: 0` and `gcTime: 5 min`; a declared write never caches,
    whatever the page asks; an unannotated tool caches only when the page
-   opts in. `staleTime` is capped at 5 min, `gcTime` at 24 h, `refresh`
-   skips the read.
+   opts in. `staleTime` is capped at 5 min, `gcTime` at 24 h. `refresh`
+   is "invalidate then call": it skips the read and starts its own
+   execution even when an identical one is in flight.
 5. **Cache.** Keyed by artifact, viewer and the order-insensitive identity
    of `(server, tool, input)`; successful results only; a result the server
    marks `X-Frame-Mcp-No-Store: 1` is never stored. A hit carries
    `cache: {storedAt, revalidating: false}`; a fresh execution carries no
    marker; any `cache` field from upstream is stripped. Identical cached
-   calls in flight share one execution; a caller that aborts leaves the
-   shared flight running for the others.
-6. **Watches.** Reads only (a wire-explicit `readOnlyHint: false` rejects).
-   Registration answers first; a turn later the stored entry is replayed
-   (`revalidating: true` when past `staleTime`), a refresh executes when the
-   entry is missing or stale, and every later result for the identity —
-   the watch's own polls, other cached callers, `invalidate` — is delivered.
+   calls in flight share one execution, and a tool-level failure reaches
+   every sharer as the same `tool_error` envelope; a caller that aborts
+   leaves the shared flight running for the others. The annotations lookup
+   and the execution together fit under the 130 s reply budget.
+6. **Watches.** Reads only (a wire-explicit `readOnlyHint: false` rejects,
+   and so does a `gcTime` that is not positive: a watch keeps its result to
+   replay it). Registration answers first; a turn later the stored entry is
+   replayed (`revalidating: true` when past `staleTime`), a refresh executes
+   when the entry is missing or stale, and every later result for the
+   identity — the watch's own polls, other cached callers, `invalidate` —
+   is delivered exactly once, however many watches share the identity.
    `refetchInterval` is clamped to a 30 s floor, paused while the page is
-   hidden with one catch-up refetch on return. At most 64 per view.
+   hidden with one catch-up refetch on return. At most 64 per view. An
+   `unwatchTool`, or a remount, that lands while a registration is still
+   being decided wins: nothing is registered.
 7. **`invalidate`.** Drops the matching entries (all, one server, one tool,
    or one exact input, where `null`, `{}` and an omitted input are the same
-   call) and re-executes every watched identity among them.
+   call), forgets any execution in flight for them, and re-executes every
+   watched identity among them.
 
 **Server (`server.ts`)** — the boundary a direct HTTP caller meets. Both
-routes require the artifact to declare `mcp` and the viewer to be able to
-interact (`view` → `not_granted`). `/servers` answers the manifest
-intersected with the directory: a server the directory does not know or a
-`host:` one is omitted; a server that fails to list answers with an empty
-tool set and its auth status. `/call` re-checks the manifest, refuses `host:`
-servers and non-object arguments, holds at most 8 calls per viewer
-(`rate_limited`), gives a call 120 s and aborts it when the client goes
-away, and maps every failure to a page code and a status. Results go back
-as the connector produced them: `content`, `structuredContent`, `isError`.
+routes accept only the shell page's own requests (`application/json`, and
+neither a `Sec-Fetch-Site` nor an `Origin` naming another site — a
+cross-site "simple" POST would otherwise run a tool with no dialog, cookie
+or not), require the artifact to declare `mcp` and the viewer to be able
+to interact (`view` → `not_granted`), and meter the body against a 512 KiB
+cap as it streams. `/servers` answers the manifest intersected with the
+directory: a server the directory does not know or a `host:` one is
+omitted; a server that fails to list answers with an empty tool set and its
+auth status. `/call` re-checks the manifest, refuses `host:` servers and
+non-object arguments, holds at most 8 calls per viewer and 64 in flight
+server-wide (`rate_limited`), gives a call 120 s and aborts it when the
+client goes away, refuses a result over 4 MB, and maps every failure to a
+page code and a status. Results go back as the connector produced them:
+`content`, `structuredContent`, `isError`. The client pool keeps one
+connection per configured server for every viewer: a request's own timeout
+or HTTP status never drops it (that would fail everyone else's calls), only
+a dead transport does, and a lapsed credential forgets the tool listing so
+`listTools` stops reporting the connector as connected.
 
 ## Deviations from the platform, and why
 
@@ -156,9 +184,11 @@ as the connector produced them: `content`, `structuredContent`, `isError`.
   `RpcHost` seam carries no such option, and `src/shell/consent.ts` makes
   the iframe inert instead. A page can therefore ask on load; the answer is
   still the viewer's.
-- **`host:` servers are always `server_not_connected`**, and `listTools`
-  omits them: a service never runs a device server, and this shell has no
-  host bridge.
+- **`host:` servers are always `server_not_connected`**, `listTools` omits
+  them, and `permissions.state("mcp:host:<name>")` reads `unavailable`
+  rather than `prompt`: a service never runs a device server, this shell
+  has no host bridge, and a consent that could never be used would only
+  keep the bare-`mcp` aggregate from ever settling.
 - **Malformed manifest entries are dropped, not refused.** The platform
   refuses an entry with no tools at publish; `src/server/admin.ts` is
   spine-owned and stores the declaration verbatim, so `readManifest` drops
@@ -169,9 +199,14 @@ as the connector produced them: `content`, `structuredContent`, `isError`.
   is marked, while the watch's own execution is delivered unmarked.
 - **`blocked_by_policy` and `approval_required` are never produced** — there
   is no org policy here. `rate_limited` is real: the server's per-viewer cap.
+- **`input` is an object.** The contract's prose allows any plain JSON but
+  its signature says "arguments object", and MCP's `tools/call` takes an
+  object; both `callTool` and `invalidate` reject anything else as
+  `bad_request` locally.
 - **The upstream `fetch` ignores proxy variables.** The SDK uses Node's
-  global `fetch`; behind a proxy, hand `createClientPool` a `fetch` built on
-  an `undici` proxy agent. The fake directory needs no network.
+  global `fetch`; behind a proxy, `server.ts` would have to hand
+  `createClientPool` a `fetch` built on an `undici` proxy agent — a source
+  edit, not configuration. The fake directory needs no network.
 - **The `listTools` wire shape is inferred** (`docs/surface-area.md` §12
   flags it): the broker answers `[{server, authStatus, tools}]`, and the
   frame reads either that or `{servers: [...]}`. Conformance mode against

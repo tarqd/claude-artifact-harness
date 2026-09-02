@@ -86,9 +86,53 @@ describe("the gate", () => {
     expect(await response.json()).toMatchObject({ code: "not_granted" });
   });
 
-  it("refuses a body over the cap", async () => {
+  it("refuses a body over the cap, declared or chunked", async () => {
     const response = await call({ server: "Fake Tools", tool: "echo", input: { big: "x".repeat(600_000) } });
     expect(response.status).toBe(413);
+    // No content-length at all: the cap is enforced on the stream.
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= 4_000_000) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new TextEncoder().encode("x".repeat(64 * 1024)));
+        sent += 64 * 1024;
+      },
+    });
+    const chunked = await fetch(`${server.shellOrigin}/api/frame/mcp/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body,
+      // @ts-expect-error -- Node's fetch needs this for a streaming body
+      duplex: "half",
+    }).catch(() => null);
+    // Node may report the early close as a failed fetch rather than a 413;
+    // either way the server never buffered the four megabytes.
+    if (chunked) expect(chunked.status).toBe(413);
+    expect(sent).toBeLessThan(4_000_000);
+  });
+
+  it("only accepts the shell page's own requests", async () => {
+    const crossSite = await post("/api/frame/mcp/call", { artifactId, server: "Fake Tools", tool: "echo", input: {} }, server, {
+      "sec-fetch-site": "cross-site",
+      origin: "https://evil.example",
+    });
+    expect(crossSite.status).toBe(403);
+    expect(await crossSite.json()).toMatchObject({ code: "not_granted" });
+    const otherOrigin = await post("/api/frame/mcp/servers", { artifactId }, server, { origin: "https://evil.example" });
+    expect(otherOrigin.status).toBe(403);
+    // A "simple" request (no preflight) is refused by its content type.
+    const simple = await fetch(`${server.shellOrigin}/api/frame/mcp/call`, {
+      method: "POST",
+      headers: { "content-type": "text/plain", cookie },
+      body: JSON.stringify({ artifactId, server: "Fake Tools", tool: "echo", input: {} }),
+    });
+    expect(simple.status).toBe(415);
+    // The shell page itself passes.
+    const own = await post("/api/frame/mcp/servers", { artifactId }, server, { "sec-fetch-site": "same-origin", origin: server.shellOrigin });
+    expect(own.status).toBe(200);
   });
 });
 
@@ -169,8 +213,10 @@ describe("POST /api/frame/mcp/call", () => {
   });
 
   it("caps calls one viewer may run at once", async () => {
+    const before = fakeCallCount();
     const slow = Array.from({ length: 8 }, () => call({ server: "Fake Tools", tool: "slow", input: { ms: 800 } }));
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // The slow tool counts its call as it starts: wait until all eight run.
+    await waitFor(() => fakeCallCount() === before + 8);
     const ninth = await call({ server: "Fake Tools", tool: "echo", input: {} });
     expect(ninth.status).toBe(429);
     expect(await ninth.json()).toMatchObject({ code: "rate_limited", retryable: true });
@@ -189,11 +235,22 @@ describe("POST /api/frame/mcp/call", () => {
       body: JSON.stringify({ artifactId, server: "Fake Tools", tool: "slow", input: { ms: 3_000 } }),
       signal: controller.signal,
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitFor(() => fakeCallCount() === before + 1);
+    const started = Date.now();
     controller.abort();
     await expect(pending).rejects.toThrow();
-    // The slow tool counts its call at the start; the point is that it
-    // returned promptly rather than after three seconds.
-    expect(fakeCallCount()).toBe(before + 1);
+    // The connector's own promise settles promptly on the abort rather than
+    // after three seconds: a second call is admitted at once.
+    const next = await call({ server: "Fake Tools", tool: "echo", input: {} });
+    expect(next.status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
+
+async function waitFor(condition: () => boolean, ms = 5_000): Promise<void> {
+  const until = Date.now() + ms;
+  while (!condition()) {
+    if (Date.now() > until) throw new Error("condition not met in time");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

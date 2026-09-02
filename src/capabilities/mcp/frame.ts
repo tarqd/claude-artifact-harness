@@ -335,6 +335,9 @@ export function createMcp(ctx: FrameContext, options: McpClientOptions = {}): Mc
       const opts = isRecord(options) ? options : {};
       const cache = readCacheOption(opts.cache, "watch");
       if (cache === false) throw badRequest("watchTool cannot run uncached: it delivers through the cache");
+      if (cache?.gcTime !== undefined && cache.gcTime <= 0) {
+        throw badRequest("a watch keeps its result to replay it: cache.gcTime must be positive");
+      }
       const refetchInterval = readRefetchInterval(opts.refetchInterval);
       const wireOptions: Record<string, unknown> = { watchId };
       if (cache !== undefined) wireOptions.cache = cache;
@@ -384,7 +387,10 @@ export function createMcp(ctx: FrameContext, options: McpClientOptions = {}): Mc
         if (server === undefined || tool === undefined) {
           throw badRequest("invalidate(input) needs the server and tool too");
         }
-        if (!isPlainJson(input)) throw badRequest("input must be plain JSON");
+        // The same rule as callTool: arguments are a plain JSON object.
+        if (input !== null && (!isRecord(input) || !isPlainJson(input))) {
+          throw badRequest("input must be a plain JSON object of tool arguments");
+        }
         args.push(input);
       }
       await request(nextId(), "invalidate", args, DEFAULT_BUDGET_MS);
