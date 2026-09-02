@@ -12,6 +12,7 @@ import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { capError, isCapError, type CapError } from "../../protocol/errors.ts";
 import { isArtifactId } from "../../protocol/paths.ts";
+import type { Viewer } from "../../server/auth.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import {
   MAX_PROMPT_BYTES,
@@ -49,6 +50,15 @@ const API_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image
 const MAX_TOOL_DEFINITIONS_BYTES = 32_768;
 /** Streams one caller may hold open at once, across every tab they have. */
 const MAX_STREAMS_PER_VIEWER = 8;
+/**
+ * Streams one remote address may hold open at once, over every cookie it
+ * presents. A caller that keeps no cookie is handed one by the first reply it
+ * gets, so the per-caller bound alone bounds cookies rather than clients;
+ * this is the one that survives a client farming them. Deliberately above
+ * `MAX_STREAMS_PER_VIEWER` — a NAT'd office is one address — and below
+ * `MAX_STREAMS_TOTAL`, so one address can never fill the server.
+ */
+const MAX_STREAMS_PER_ADDRESS = 16;
 /**
  * Streams open at once, server-wide, whoever asks. Every one of them is a
  * socket and an upstream Messages API request on the operator's key, so this
@@ -428,35 +438,49 @@ const waiters = new Map<string, ToolWaiter>();
 
 /**
  * In-flight accounting, as mcp's `Slots` does it: one slot per open stream,
- * counted per caller and server-wide. The per-caller bound keeps one viewer
- * from taking the whole server; the server-wide bound is what still holds
- * when the calls are spread over many callers.
+ * counted three ways. The per-caller bound keeps one viewer from taking the
+ * whole server; the per-address bound is the one a caller cannot shed by
+ * dropping its cookie and picking up a fresh one; the server-wide bound is
+ * what still holds when the calls are spread over many addresses.
+ *
+ * Exported for tests: the server-wide bound sits above the per-address one,
+ * so no single client can reach it over HTTP.
  */
-class Streams {
+export class Streams {
   private total = 0;
   private readonly perCaller = new Map<string, number>();
+  private readonly perAddress = new Map<string, number>();
 
   get open(): number {
     return this.total;
   }
 
-  /** A release function, or which bound refused this stream. */
-  take(caller: string): (() => void) | "server_busy" | "caller_busy" {
-    if (this.total >= MAX_STREAMS_TOTAL) return "server_busy";
+  /** A release for one stream, or `null` when any of the three bounds is full. */
+  take(caller: string, address: string): (() => void) | null {
     const held = this.perCaller.get(caller) ?? 0;
-    if (held >= MAX_STREAMS_PER_VIEWER) return "caller_busy";
+    const fromAddress = this.perAddress.get(address) ?? 0;
+    if (this.total >= MAX_STREAMS_TOTAL) return null;
+    if (fromAddress >= MAX_STREAMS_PER_ADDRESS) return null;
+    if (held >= MAX_STREAMS_PER_VIEWER) return null;
     this.total++;
     this.perCaller.set(caller, held + 1);
+    this.perAddress.set(address, fromAddress + 1);
     let released = false;
     return () => {
       if (released) return;
       released = true;
       this.total--;
-      const now = this.perCaller.get(caller) ?? 1;
-      if (now <= 1) this.perCaller.delete(caller);
-      else this.perCaller.set(caller, now - 1);
+      drop(this.perCaller, caller);
+      drop(this.perAddress, address);
     };
   }
+}
+
+/** One off a counter, forgetting the key at zero so the maps stay bounded. */
+function drop(counts: Map<string, number>, key: string): void {
+  const now = counts.get(key) ?? 1;
+  if (now <= 1) counts.delete(key);
+  else counts.set(key, now - 1);
 }
 
 const streams = new Streams();
@@ -466,21 +490,32 @@ export function openStreamCount(): number {
   return streams.open;
 }
 
+/** The address a request came from; one bucket for everything unknown. */
+function addressKey(c: Context): string {
+  const env = c.env as { incoming?: { socket?: { remoteAddress?: unknown } } } | null | undefined;
+  const address = env?.incoming?.socket?.remoteAddress;
+  return typeof address === "string" && address ? address : "unknown";
+}
+
 /**
  * Who an open stream is charged to. Only a cookie this server signed names a
  * viewer here: `auth.viewer()` mints an id for a request that carries none,
  * so keying the per-caller budget on that id would hand a fresh budget to
  * every cookie-less request — the cap would come free to any caller that
  * simply keeps no cookie. Those requests share one bucket per address
- * instead, and `MAX_STREAMS_TOTAL` bounds the rest.
+ * instead, and every stream is charged to its address as well, so a caller
+ * that does collect cookies is still held to `MAX_STREAMS_PER_ADDRESS`.
  */
-function callerKey(c: Context, ctx: ServerContext): string {
-  const signed = ctx.auth.existingViewerId(c);
-  if (signed) return `viewer:${signed}`;
-  const env = c.env as { incoming?: { socket?: { remoteAddress?: unknown } } } | null | undefined;
-  const address = env?.incoming?.socket?.remoteAddress;
-  return `addr:${typeof address === "string" && address ? address : "unknown"}`;
+function callerKey(viewerId: string | null, address: string): string {
+  return viewerId ? `viewer:${viewerId}` : `addr:${address}`;
 }
+
+/**
+ * The viewer a request carrying no cookie stands for while the gate decides.
+ * `levelFor` reads only ownership, and a caller with no id owns nothing —
+ * neither does the id `auth.viewer()` would have minted, which is fresh.
+ */
+const ANONYMOUS: Viewer = { id: "", isOwner: false };
 
 /* --------------------------------- routes --------------------------------- */
 
@@ -677,8 +712,11 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       if (!declared) {
         refuse(400, "not_declared", "this artifact no longer declares sample");
       }
-      const viewer = ctx.auth.viewer(c);
-      const level = ctx.auth.levelFor(viewer, meta);
+      // Read the cookie the request carries; do not mint one yet. Minting
+      // here would set `av` on the refusals below too, and a caller that
+      // pockets that cookie is a caller with a fresh per-caller budget.
+      const existing = ctx.auth.existingViewer(c);
+      const level = ctx.auth.levelFor(existing ?? ANONYMOUS, meta);
       if (level === "view") {
         refuse(403, "not_granted", "this viewer may not use Claude here");
       }
@@ -701,21 +739,20 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       const backend = selectBackend();
       if (isCapError(backend)) throw new Refusal(503, backend);
 
-      // Last, so nothing below can refuse the call after a slot is held.
-      const slot = streams.take(callerKey(c, ctx));
-      if (slot === "server_busy") {
-        refuse(
-          429,
-          "rate_limited",
-          "this server is running as many calls as it will hold - try again shortly",
-        );
-      }
-      if (slot === "caller_busy") {
+      // Last, so nothing below can refuse the call after a slot is held. One
+      // body for all three bounds, as mcp's `busy()` is: which bound a call
+      // hit is cross-viewer server state, and not a page's to read.
+      const address = addressKey(c);
+      const release = streams.take(callerKey(existing?.id ?? null, address), address);
+      if (!release) {
         refuse(429, "rate_limited", "too many calls at once - let the viewer try again");
       }
+      // A slot is held, so this call is going to be served: name the viewer
+      // now, minting the cookie for a caller that arrived without one.
+      const viewer = existing ?? ctx.auth.viewer(c);
       plan = {
         viewerId: viewer.id,
-        release: slot,
+        release,
         callId: body.callId,
         input,
         modelTier: isModelTier(body.modelTier) ? body.modelTier : "default",

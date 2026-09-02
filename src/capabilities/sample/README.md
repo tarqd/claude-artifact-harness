@@ -98,15 +98,21 @@ imports the other.
   `capabilities.sample.config` declares them, and are then held to that
   config's `maxCount`, per-image `maxBytes` and `maxTotalBytes`, the four
   media types the Messages API reads, and 32 KB of tool definitions.
-- Concurrency is bounded twice, both `rate_limited` (429): 8 open streams per
-  caller and 32 server-wide, whoever asks — every open stream is a socket and
-  an upstream request on the operator's key, and the server-wide bound is the
-  one that still holds when the calls come from many callers. At most 64
-  calls may be parked on page tool results, which the stream bound already
-  implies. A caller is the viewer named by the signed cookie the request
-  carries; requests carrying none share one bucket per remote address,
+- Concurrency is bounded three ways, all one `rate_limited` (429) — which
+  bound fired is cross-viewer server state, not the page's to read: 8 open
+  streams per caller, 16 per remote address, and 32 server-wide, whoever
+  asks. Every open stream is a socket and an upstream request on the
+  operator's key. A caller is the viewer named by the signed cookie the
+  request carries; requests carrying none share one bucket per address,
   because `auth.viewer()` mints an id for such a request and a budget keyed
-  on that id would renew itself on every call.
+  on that id would renew itself on every call. The per-address bound is what
+  holds when a client farms cookies — the route mints none on a refusal, but
+  the shell page hands one to anybody who asks — and it sits above one
+  viewer's worth so a NAT'd office still gets service, and below the
+  server-wide one so a single address can never fill the server. At most 64
+  calls may be parked on page tool results, which the stream bound already
+  implies. Behind a reverse proxy every viewer shares the proxy's address, as
+  `user`'s address rate limit does.
 - The real backend calls the Messages API with `fetch` (no SDK): tiers
   `quick` → `claude-haiku-4-5-20251001`, `default` → `claude-sonnet-5`,
   `complex` → `claude-opus-5`, streaming, tool round trips (up to 8 rounds,
@@ -145,8 +151,11 @@ Environment: `ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL`,
 - **Backend state is per process.** The tool-results lane holds waiting calls
   in memory, so the shell must reach the same process that started the
   stream — true for the single-process harness, not for a cluster.
-- `resetSampleBrokerState()` and `fakeBackendCallCount()` exist for tests
-  only; nothing in the runtime path calls them.
+- `resetSampleBrokerState()`, `fakeBackendCallCount()` and
+  `openStreamCount()` exist for tests only, and the `Streams` class is
+  exported for them because the server-wide bound sits above the per-address
+  one and so cannot be reached over HTTP from one address; nothing in the
+  runtime path calls them.
 
 ## How to test
 

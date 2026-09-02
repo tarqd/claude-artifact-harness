@@ -5,8 +5,8 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { openStreamCount } from "../../src/capabilities/sample/server.ts";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { Streams, openStreamCount } from "../../src/capabilities/sample/server.ts";
 import { startServer, type RunningServer } from "../../src/server/index.ts";
 import type { SampleEvent } from "../../src/capabilities/sample/protocol.ts";
 
@@ -375,21 +375,33 @@ function open(signal: AbortSignal, jar: string | null, input: string): Promise<R
   });
 }
 
+/** `n` calls at once on one cookie, every one held open until `signal` fires. */
+function hold(signal: AbortSignal, jar: string | null, n: number): Promise<Response[]> {
+  return Promise.all(Array.from({ length: n }, () => open(signal, jar, HOLD)));
+}
+
 async function waitFor(predicate: () => boolean, ms = 10_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error("condition never held");
+    if (Date.now() > deadline) {
+      throw new Error(`condition never held (open streams: ${openStreamCount()})`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
 
+/** The caps are absolute, so every test here starts from an idle server. */
+async function idle(): Promise<void> {
+  await waitFor(() => openStreamCount() === 0);
+}
+
 describe("concurrency caps", () => {
+  beforeEach(idle);
+
   it("charges cookie-less callers one budget, not a fresh one each", async () => {
     const controller = new AbortController();
     try {
-      const held = await Promise.all(
-        Array.from({ length: 8 }, () => open(controller.signal, null, HOLD)),
-      );
+      const held = await hold(controller.signal, null, 8);
       expect(held.every((r) => r.status === 200)).toBe(true);
       await waitFor(() => openStreamCount() === 8);
       // Nine cookie-less calls used to be nine viewers: each request minted
@@ -397,38 +409,52 @@ describe("concurrency caps", () => {
       const ninth = await open(controller.signal, null, "hi");
       expect(ninth.status).toBe(429);
       expect((await ninth.json()) as { code: string }).toMatchObject({ code: "rate_limited" });
+      // And a refusal hands out no identity, so the caller it refused cannot
+      // pocket a cookie from it and come back with a budget of its own.
+      expect(ninth.headers.get("set-cookie")).toBe(null);
       // A viewer holding a cookie of their own still gets their own budget.
       const legit = await open(controller.signal, await mintCookie(), "hello there");
       expect(legit.status).toBe(200);
       expect(textOf(await collect(legit))).toContain("hello there");
     } finally {
       controller.abort();
-      await waitFor(() => openStreamCount() === 0);
+      await idle().catch(() => undefined);
     }
   }, 30_000);
 
-  it("caps streams server-wide, however many viewers ask", async () => {
+  it("caps one address however many cookies it farms", async () => {
     const controller = new AbortController();
     try {
-      const jars = await Promise.all(Array.from({ length: 4 }, () => mintCookie()));
-      const held = await Promise.all(
-        jars.flatMap((jar) => Array.from({ length: 8 }, () => open(controller.signal, jar, HOLD))),
-      );
+      const [first, second, third] = await Promise.all([
+        mintCookie(),
+        mintCookie(),
+        mintCookie(),
+      ]);
+      // Two viewers from one address, each inside their own budget: both are
+      // served, so the address bound is worth more than one viewer's.
+      const held = [
+        ...(await hold(controller.signal, first, 8)),
+        ...(await hold(controller.signal, second, 8)),
+      ];
       expect(held.every((r) => r.status === 200)).toBe(true);
-      await waitFor(() => openStreamCount() === 32);
-      // A fresh viewer, inside their own per-viewer budget, still waits: the
-      // server has no stream (and no upstream request) left to give.
-      const refused = await open(controller.signal, await mintCookie(), "hi");
-      expect(refused.status).toBe(429);
-      expect((await refused.json()) as { code: string }).toMatchObject({ code: "rate_limited" });
+      await waitFor(() => openStreamCount() === 16);
+      // A third cookie off the same address buys nothing: a stream is charged
+      // to its address as well as to its viewer, so farming cookies — which
+      // any visit to the shell page hands out — no longer walks past the cap.
+      const farmed = await open(controller.signal, third, "hi");
+      expect(farmed.status).toBe(429);
+      expect((await farmed.json()) as { code: string }).toMatchObject({ code: "rate_limited" });
+      // Nor does dropping the cookie again.
+      const bare = await open(controller.signal, null, "hi");
+      expect(bare.status).toBe(429);
+      expect(openStreamCount()).toBe(16);
     } finally {
       controller.abort();
-      await waitFor(() => openStreamCount() === 0);
+      await idle().catch(() => undefined);
     }
   }, 30_000);
 
   it("frees a slot when the stream ends, so the next call goes through", async () => {
-    const before = openStreamCount();
     const jar = await mintCookie();
     for (let i = 0; i < 10; i++) {
       const response = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
@@ -439,6 +465,52 @@ describe("concurrency caps", () => {
       expect(response.status).toBe(200);
       await collect(response);
     }
-    await waitFor(() => openStreamCount() === before);
+    await idle();
   }, 30_000);
+});
+
+/**
+ * The server-wide bound sits above the per-address one, so one address — all
+ * a test has — cannot reach it over HTTP: the accounting is driven directly.
+ */
+describe("Streams accounting", () => {
+  function fill(streams: Streams, caller: string, address: string, n: number): (() => void)[] {
+    return Array.from({ length: n }, () => {
+      const release = streams.take(caller, address);
+      expect(release).not.toBe(null);
+      return release as () => void;
+    });
+  }
+
+  it("holds one caller to 8 streams and one address to 16", () => {
+    const streams = new Streams();
+    fill(streams, "viewer:a", "10.0.0.1", 8);
+    expect(streams.take("viewer:a", "10.0.0.1")).toBe(null);
+    // A second viewer behind that address is still served...
+    fill(streams, "viewer:b", "10.0.0.1", 8);
+    expect(streams.open).toBe(16);
+    // ...and a third is not: the address is at a bound of its own.
+    expect(streams.take("viewer:c", "10.0.0.1")).toBe(null);
+    // Another address is untouched by all of it.
+    expect(streams.take("viewer:c", "10.0.0.2")).not.toBe(null);
+  });
+
+  it("holds the server to 32 streams however many addresses ask", () => {
+    const streams = new Streams();
+    for (let i = 0; i < 4; i++) fill(streams, `viewer:${i}`, `10.0.0.${i}`, 8);
+    expect(streams.open).toBe(32);
+    // A fresh viewer at a fresh address, inside both of the other bounds,
+    // still waits: the server has no stream left to give.
+    expect(streams.take("viewer:new", "10.0.9.9")).toBe(null);
+  });
+
+  it("gives a slot back on release, and only once", () => {
+    const streams = new Streams();
+    const [release] = fill(streams, "viewer:a", "10.0.0.1", 8);
+    expect(streams.take("viewer:a", "10.0.0.1")).toBe(null);
+    release!();
+    release!();
+    expect(streams.open).toBe(7);
+    expect(streams.take("viewer:a", "10.0.0.1")).not.toBe(null);
+  });
 });
