@@ -200,7 +200,27 @@ function readInit(value: unknown): FrameInit | null {
   };
 }
 
+/**
+ * The shell mints `__frame_t` (a 30-minute bearer naming the viewer and
+ * artifact) into the iframe's `src`, and the frame middleware consumes it
+ * server-side while serving this page (`serve.ts`); nothing here ever reads
+ * it. Once that happens the token has no further job, so it is scrubbed
+ * from `location.search` here — otherwise it would sit in the address bar,
+ * `document.referrer` of any onward navigation, and browser history.
+ */
+function stripFrameToken(): void {
+  try {
+    const url = new URL(location.href);
+    if (!url.searchParams.has("__frame_t")) return;
+    url.searchParams.delete("__frame_t");
+    history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+  } catch {
+    /* a sandboxed frame or an ancient browser: leave the URL as it is */
+  }
+}
+
 function boot(): void {
+  stripFrameToken();
   const config = readPreambleConfig();
   const framed = window !== window.top;
   const names = config ? Object.keys(config.capabilities) : [];

@@ -252,12 +252,61 @@ function artifactIdFrom(host: string | undefined, header: string | undefined): s
   return header && isArtifactId(header) ? header : null;
 }
 
+/**
+ * Validates a `next=` redirect target against the shell origin and returns
+ * the exact URL to send the browser to, or `null` if it doesn't resolve to
+ * a same-origin destination.
+ *
+ * Resolved against a *normalized* shell origin — `new URL(shellOrigin).origin`,
+ * not the raw `http://host:port` string — because `shellOrigin` is a plain
+ * template (`shellOrigin()` in `config.ts`) that is not port-normalized the
+ * way `URL#origin` is: with the default HTTP port, `"http://host:80"` and
+ * `new URL("/x", "http://host:80").origin` (`"http://host"`) are different
+ * strings, so a textual `===` against the un-normalized value would reject
+ * every `next=`, including legitimate same-origin ones.
+ *
+ * Returns a root-relative Location (`pathname + search + hash`) derived from
+ * the *parsed* URL, never the raw `next` string it was validated from:
+ * `new URL()` silently strips ASCII tab/CR/LF while parsing, so a
+ * same-origin-looking `next` smuggling CRLF would otherwise reach
+ * `Headers.set` verbatim, which throws on control characters (crashing the
+ * request). A pathname that would itself read as protocol-relative once
+ * re-emitted (`new URL("/..//evil.com", shellOrigin).pathname` is
+ * `//evil.com`) is rejected by the guard below rather than redirected to.
+ */
+export function resolveNextRedirect(next: string, shellOrigin: string): string | null {
+  let target: URL;
+  let normalizedShellOrigin: string;
+  try {
+    target = new URL(next, shellOrigin);
+    normalizedShellOrigin = new URL(shellOrigin).origin;
+  } catch {
+    return null;
+  }
+  if (target.origin !== normalizedShellOrigin) return null;
+  // Emit a root-relative Location rather than `target.href`: an absolute
+  // URL would carry the shell's *internal* origin (e.g. `http://host:port`)
+  // straight into the browser, which is wrong behind a proxy or a
+  // differently-hosted deployment. (Userinfo in `next` never reaches the
+  // output: `origin` excludes it and so does the path/search/hash below.)
+  const rel = target.pathname + target.search + target.hash;
+  // A single leading "/" followed by anything but another "/" or "\": this
+  // rejects `//evil.com` and `/\evil.com`-shaped pathnames (e.g. from
+  // `next=/..//evil.com`, whose `.pathname` is `//evil.com`) that would
+  // otherwise become a protocol-relative Location.
+  if (!/^\/(?![\/\\])/.test(rel)) return null;
+  return rel;
+}
+
 export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
   app.get("/login", (c) => {
     const ok = ctx.auth.login(c, c.req.query("token") ?? "");
     if (!ok) return c.text("invalid owner token", 403);
     const next = c.req.query("next");
-    if (next && next.startsWith("/")) return c.redirect(next);
+    if (next) {
+      const target = resolveNextRedirect(next, ctx.shellOrigin);
+      if (target) return c.redirect(target);
+    }
     return c.text("logged in as the owner");
   });
 
@@ -286,9 +335,13 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
     // The consent dialog lives on this page: it must not be framed, and its
     // type must not be sniffed. (The frame origin gets its own headers in
     // `mountFrameRoutes`; this is the same posture for the decision surface.)
+    // It also inlines `__SHELL_BOOT.frameUrl`, which carries the 30-minute
+    // `__frame_t` asset token naming this viewer — `no-store` keeps that out
+    // of shared-machine and proxy caches, matching the frame HTML's posture.
     return c.html(renderShellPage(boot), 200, {
       "content-security-policy": "frame-ancestors 'none'",
       "x-content-type-options": "nosniff",
+      "cache-control": "no-store",
     });
   });
 
