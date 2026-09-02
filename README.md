@@ -139,10 +139,27 @@ ARTIFACT_OWNER_TOKEN=<a long random string>
 `PUBLIC_SHELL_URL` being `https:` is the single switch: the two origins are
 built with it, the viewer and owner cookies become `Secure` and gain the
 `__Host-` prefix (which a sibling host under the same registrable domain
-cannot toss at us), and `frame-ancestors` names the https shell. The frame
-origin needs wildcard DNS (`*.artifacts.example.com`) and the same
-certificate; the terminator must pass the host through unchanged. `npm
-start` prints a warning when it is bound wide open on plain http.
+cannot toss at us), `frame-ancestors` names the https shell, and both
+origins send `Strict-Transport-Security: max-age=31536000; includeSubDomains`
+so the *next* bare-host visit never leaves as plain http. The frame origin
+needs wildcard DNS (`*.artifacts.example.com`) and the same certificate; the
+terminator must pass the host through unchanged. `npm start` prints a
+warning when it is bound wide open on plain http.
+
+**Throwing the switch changes who your visitors are.** The `__Host-` prefix
+is a new cookie name, so every browser holding an `av` cookie becomes a
+brand-new viewer: it gets a fresh id and its `data/users/<oldId>/…` rows,
+its `user` profile and its room identity are no longer its own. Flip the
+scheme before a deployment has real users, or migrate the ids deliberately.
+Every owner must also log in again — the owner cookie is bound to the token
+it was minted under (rotating `ARTIFACT_OWNER_TOKEN` ends every owner
+session for the same reason).
+
+The login form itself is `POST /login`, accepted only from the shell origin
+and given a small per-address budget for *wrong* tokens — a correct one is
+never throttled, since behind a terminator every request arrives from the
+proxy's address and a budget that counted successes would be a remote
+lockout of the operator rather than a brake on guessing.
 
 ## Environment variables
 

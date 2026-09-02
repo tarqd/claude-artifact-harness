@@ -27,10 +27,16 @@ class Client {
   cookie = "";
 
   private absorb(response: Response): void {
+    // The names are `Auth`'s: they gain the `__Host-` prefix on https, so
+    // this client keeps working if the suite is ever run over one.
+    const keep = new Set([
+      server.context.auth.viewerCookieName(),
+      server.context.auth.ownerCookieName(),
+    ]);
     for (const raw of response.headers.getSetCookie()) {
       const pair = raw.split(";")[0] ?? "";
       const name = pair.split("=")[0] ?? "";
-      if (name !== "av" && name !== "ao") continue;
+      if (!keep.has(name)) continue;
       const kept = this.cookie.split("; ").filter((c) => c && !c.startsWith(`${name}=`));
       kept.push(pair);
       this.cookie = kept.join("; ");
