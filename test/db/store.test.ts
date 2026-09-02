@@ -2,12 +2,13 @@
  * The filesystem document store: last-writer-wins writes, merge updates,
  * leases, queries and the documented limits.
  */
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   DbStore,
+  docFileName,
   DEFAULT_TTL_MS,
   MAX_DOC_DEPTH,
   MAX_TTL_MS,
@@ -227,5 +228,100 @@ describe("leases", () => {
     await store.acquire(LID, "locks/data", { holder: "h", data: { by: "h" } });
     expect((await store.read(LID, "locks/data"))?.data).toEqual({ by: "h" });
     await expect(store.acquire(LID, "locks/data", { holder: "" })).rejects.toThrow(invalid);
+  });
+});
+
+describe("on-disk names", () => {
+  const DISK = "3333333333333333333333333333cccc";
+  const VIEWER = "u_AAAAAAAAAAAAAAAAAAAAAA";
+  /** How documents were named before the name became a hash of the path. */
+  const legacyName = (path: string) =>
+    `${path.split("/").map(encodeURIComponent).join("__")}.json`;
+
+  it("gives every path in the grammar its own file", () => {
+    // "_" lives inside the segment grammar and "/" is the separator, so a
+    // joiner-based encoding cannot separate these paths; the hash must.
+    expect(docFileName("data/users/u_1/profile")).not.toBe(docFileName("data__users__u_1/profile"));
+    const alphabet = ["a", "_", "__", "-", ".", "~", ":", "@", "+", "x_y"];
+    const paths = new Set<string>();
+    for (const a of alphabet) {
+      for (const b of alphabet) {
+        paths.add(`${a}/${b}`);
+        paths.add(`${a}${b}/a`);
+        paths.add(`${a}/${b}/a/b`);
+      }
+    }
+    const names = new Set([...paths].map(docFileName));
+    expect(names.size).toBe(paths.size);
+  });
+
+  it("keeps a private document out of reach of a colliding public path", async () => {
+    const store = new DbStore(dataDir);
+    const secret = `data/users/${VIEWER}/profile`;
+    const collides = `data__users__${VIEWER}/profile`;
+    await store.set(DISK, secret, { email: "victim@example.com" });
+    await store.set(DISK, collides, { owned: true });
+    await store.delete(DISK, collides);
+    // The attacker's write and delete touched only their own file.
+    store.forget(DISK);
+    expect((await store.read(DISK, secret))?.data).toEqual({ email: "victim@example.com" });
+    expect(await store.read(DISK, collides)).toBeNull();
+  });
+
+  it("persists a path too long to spell out in a file name", async () => {
+    const store = new DbStore(dataDir);
+    const long = [1, 2, 3, 4].map((n) => `${String(n).repeat(200)}`).join("/");
+    await store.set(DISK, long, { ok: true });
+    store.forget(DISK);
+    expect((await store.read(DISK, long))?.data).toEqual({ ok: true });
+  });
+
+  it("adopts a legacy-named file, so a later delete really removes it", async () => {
+    const legacyDir = await mkdtemp(join(tmpdir(), "db-legacy-"));
+    try {
+      const dir = join(legacyDir, "artifacts", DISK, "db");
+      const path = "tasks/legacy";
+      const doc = { path, data: { title: "written by an older build" }, rev: 1, updatedAt: "2026-01-01T00:00:00.000Z" };
+      await rm(dir, { recursive: true, force: true });
+      await new DbStore(legacyDir).set(DISK, "tasks/seed", { a: 1 });
+      await writeFile(join(dir, legacyName(path)), JSON.stringify(doc));
+
+      const store = new DbStore(legacyDir);
+      expect((await store.read(DISK, path))?.data).toEqual({ title: "written by an older build" });
+      const afterLoad = await readdir(dir);
+      expect(afterLoad).toContain(docFileName(path));
+      expect(afterLoad).not.toContain(legacyName(path));
+      expect(JSON.parse(await readFile(join(dir, docFileName(path)), "utf8")).path).toBe(path);
+
+      await store.delete(DISK, path);
+      expect(await readdir(dir)).not.toContain(docFileName(path));
+      // And it stays gone once the index is rebuilt from disk.
+      expect(await new DbStore(legacyDir).read(DISK, path)).toBeNull();
+    } finally {
+      await rm(legacyDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a hashed file outrank a legacy twin, whichever readdir lists first", async () => {
+    const legacyDir = await mkdtemp(join(tmpdir(), "db-twin-"));
+    try {
+      const dir = join(legacyDir, "artifacts", DISK, "db");
+      const path = "tasks/twin";
+      await rm(dir, { recursive: true, force: true });
+      // The newer write already lives under the hashed name...
+      await new DbStore(legacyDir).set(DISK, path, { v: "new" });
+      // ...and an older build's file for the same path is still lying around.
+      const stale = { path, data: { v: "legacy" }, rev: 1, updatedAt: "2026-01-01T00:00:00.000Z" };
+      await writeFile(join(dir, legacyName(path)), JSON.stringify(stale));
+
+      const store = new DbStore(legacyDir);
+      expect((await store.read(DISK, path))?.data).toEqual({ v: "new" });
+      const after = await readdir(dir);
+      expect(after).toContain(docFileName(path));
+      expect(after).not.toContain(legacyName(path));
+      expect(JSON.parse(await readFile(join(dir, docFileName(path)), "utf8")).data).toEqual({ v: "new" });
+    } finally {
+      await rm(legacyDir, { recursive: true, force: true });
+    }
   });
 });

@@ -51,11 +51,6 @@ export function parentCollection(path: string): string | null {
   return segs.join("/");
 }
 
-/** Filesystem-safe encoding of a db path (one file per document). */
-export function encodePathForFs(path: string): string {
-  return splitPath(path).map(encodeURIComponent).join("__");
-}
-
 /* ------------------------------------------------------------------ */
 /* ids                                                                 */
 /* ------------------------------------------------------------------ */

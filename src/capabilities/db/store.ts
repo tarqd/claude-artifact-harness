@@ -7,6 +7,7 @@
  * The caller (server.ts) decides who may see what and hands this module
  * already-authorised paths.
  */
+import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { capError } from "../../protocol/errors.ts";
@@ -15,7 +16,6 @@ import { isPlainObject, mergeDeep } from "./query.ts";
 // applies a page's own write to its mirrors; callers still import them here.
 export { compareValues, isPlainObject, matchesWhere, mergeDeep, orderRows } from "./query.ts";
 import {
-  encodePathForFs,
   isCollectionPath,
   isDocumentPath,
   parentCollection,
@@ -59,6 +59,24 @@ export type QueryOperator = (typeof QUERY_OPERATORS)[number];
 const INVALID = (message: string): never => {
   throw capError("invalid_argument", message);
 };
+
+/* ------------------------------------------------------------------ */
+/* on-disk names                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The file one document lives in. The name is the sha-256 of the exact path,
+ * which is injective and bounded: a readable encoding cannot be either,
+ * because "_" is inside the segment grammar and "/" is the separator,
+ * so no joiner is unambiguous (`data/users/<vid>/profile` and
+ * `data__users__<vid>/profile` shared a file, letting any writer clobber a
+ * private document), and a grammar-valid
+ * 1000-byte path overruns NAME_MAX once escaped. The real path is carried
+ * inside the file as `doc.path`, which is what `load` indexes by.
+ */
+export function docFileName(path: string): string {
+  return `${createHash("sha256").update(path, "utf8").digest("hex")}.json`;
+}
 
 /* ------------------------------------------------------------------ */
 /* shapes                                                              */
@@ -278,17 +296,33 @@ export class DbStore {
         } catch {
           return;
         }
+        // A file written under the old readable naming keeps its content but
+        // would be orphaned by the next persist/unlink, and would then
+        // resurrect the document on the following boot. Index it, but only
+        // where no canonical file already speaks for the path, then move it
+        // onto the canonical name once the directory has been read.
+        const canonical = new Set<string>();
+        const legacy: Array<{ name: string; path: string }> = [];
         for (const name of names) {
           if (!name.endsWith(".json")) continue;
           try {
             const raw = await readFile(join(this.dir(artifactId), name), "utf8");
             const doc = JSON.parse(raw) as StoredDoc;
-            if (typeof doc.path === "string" && isPlainObject(doc.data)) {
+            if (typeof doc.path !== "string" || !isPlainObject(doc.data)) continue;
+            if (name === docFileName(doc.path)) {
               db.docs.set(doc.path, doc);
+              canonical.add(doc.path);
+            } else {
+              if (!canonical.has(doc.path)) db.docs.set(doc.path, doc);
+              legacy.push({ name, path: doc.path });
             }
           } catch {
             /* a half-written file is not a reason to refuse the whole store */
           }
+        }
+        for (const { name, path } of legacy) {
+          const doc = db.docs.get(path);
+          if (doc) await this.adopt(artifactId, name, doc, canonical.has(path));
         }
       })();
     }
@@ -322,17 +356,49 @@ export class DbStore {
     }
   }
 
+  /**
+   * Retire a legacy-named file for `doc.path`. When a canonical file already
+   * exists it is the newer write and wins, so the legacy copy is removed;
+   * otherwise the legacy file is renamed into place, or, should the rename
+   * fail, the document is written afresh and the old file removed. A file
+   * that survives all of that is left alone rather than failing the load,
+   * and will be retried on the next one.
+   */
+  private async adopt(
+    artifactId: string,
+    name: string,
+    doc: StoredDoc,
+    superseded: boolean,
+  ): Promise<void> {
+    const dir = this.dir(artifactId);
+    const stale = join(dir, name);
+    try {
+      if (superseded) {
+        await rm(stale, { force: true });
+        return;
+      }
+      try {
+        await rename(stale, join(dir, docFileName(doc.path)));
+      } catch {
+        await this.persist(artifactId, doc);
+        await rm(stale, { force: true });
+      }
+    } catch {
+      /* the index is already right; a stale file is not worth failing a load */
+    }
+  }
+
   private async persist(artifactId: string, doc: StoredDoc): Promise<void> {
     const dir = this.dir(artifactId);
     await mkdir(dir, { recursive: true });
-    const file = join(dir, `${encodePathForFs(doc.path)}.json`);
+    const file = join(dir, docFileName(doc.path));
     const tmp = `${file}.tmp`;
     await writeFile(tmp, JSON.stringify(doc));
     await rename(tmp, file);
   }
 
   private async unlink(artifactId: string, path: string): Promise<void> {
-    await rm(join(this.dir(artifactId), `${encodePathForFs(path)}.json`), { force: true });
+    await rm(join(this.dir(artifactId), docFileName(path)), { force: true });
   }
 
   /** Live leases only; an expired one is invisible to every caller. */
