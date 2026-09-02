@@ -4,6 +4,7 @@
  * (`SAMPLE_BACKEND=fake`). It checks the consent dialog, streaming, Stop, a
  * page tool round, the reply cache and the legacy `claude.complete` wrapper.
  */
+import { FOREIGN_RUNTIME } from "./foreign.ts";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -148,12 +149,16 @@ test("consent, streaming, tools, json and the reply cache", async ({ page }) => 
   });
   await expect(frame(page).locator("#out")).toContainText("[images: 1 image/");
 
-  // The legacy chat-artifact API is a thin wrapper over this namespace.
-  const content = page.frames().find((f) => f.url().includes("/_f/"));
-  const legacy = await content!.evaluate(
-    () => (window as unknown as { legacyComplete(p: string): Promise<string> }).legacyComplete("legacy hi"),
-  );
-  expect(legacy).toMatch(/^echo #\d+ \(default\): legacy hi$/);
+  // The legacy chat-artifact API is a thin wrapper over this namespace. The
+  // platform's published-artifact preamble does not carry `complete()`, so
+  // this is ours alone.
+  if (!FOREIGN_RUNTIME) {
+    const content = page.frames().find((f) => f.url().includes("/_f/"));
+    const legacy = await content!.evaluate(
+      () => (window as unknown as { legacyComplete(p: string): Promise<string> }).legacyComplete("legacy hi"),
+    );
+    expect(legacy).toMatch(/^echo #\d+ \(default\): legacy hi$/);
+  }
 
   expect(errors).toEqual([]);
 });

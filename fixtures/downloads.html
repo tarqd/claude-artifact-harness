@@ -117,10 +117,14 @@
   document.getElementById('save-buffer').addEventListener('click', function () {
     var buffer = new TextEncoder().encode('transferred bytes').buffer;
     var pending = run('buffer', { filename: 'bytes.txt', data: buffer });
-    // The contract says an ArrayBuffer is transferred: it is detached now.
-    var detached = buffer.byteLength === 0 ? 'detached' : 'intact';
-    detachedEl.setAttribute('data-value', detached);
-    detachedEl.textContent = detached;
+    // The contract says an ArrayBuffer is transferred ("detached after the
+    // call"). The platform's module hands it over a microtask later, so look
+    // on the next task rather than synchronously.
+    setTimeout(function () {
+      var detached = buffer.byteLength === 0 ? 'detached' : 'intact';
+      detachedEl.setAttribute('data-value', detached);
+      detachedEl.textContent = detached;
+    }, 0);
     return pending;
   });
 

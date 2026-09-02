@@ -8,30 +8,34 @@
 
 /**
  * The six swatches an unresolved profile is coloured from (surface-area.md
- * §5.1: "a deterministic colour from a hash of the id over six swatches").
- * The platform's exact palette is not observable from the modules, so these
- * are ours — what matters is that the choice is deterministic and stable.
+ * §5.1), the platform's own palette and hash so that an id draws the same
+ * colour here as on claude.ai (verified by the conformance run against the
+ * platform's user module).
  */
 export const SWATCHES: readonly string[] = Object.freeze([
-  "#c96442",
-  "#5a8ec0",
-  "#6f8f5c",
-  "#b08a3e",
-  "#9a6bab",
-  "#4f8f8a",
+  "#62744c",
+  "#b04e72",
+  "#5b7596",
+  "#a3651f",
+  "#7a6ba8",
+  "#3f7a75",
 ]);
 
-/** djb2 over UTF-16 code units, kept in 32 bits so it is stable everywhere. */
+/** The colour of a viewer with no id at all. */
+export const NO_ID_COLOR = "#c7c9d1";
+
+/** The platform's hash: `h = h * 31 + code`, kept unsigned 32-bit. */
 export function hashId(id: string): number {
-  let hash = 5381;
+  let hash = 0;
   for (let i = 0; i < id.length; i++) {
-    hash = ((hash << 5) + hash + id.charCodeAt(i)) | 0;
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
   }
-  return hash >>> 0;
+  return hash;
 }
 
-/** The swatch an id always gets, including the empty id (a viewer with none). */
+/** The swatch an id always gets; the empty id (a viewer with none) is grey. */
 export function colorForId(id: string): string {
+  if (id === "") return NO_ID_COLOR;
   const index = hashId(id) % SWATCHES.length;
   return SWATCHES[index] as string;
 }
@@ -39,13 +43,17 @@ export function colorForId(id: string): string {
 /**
  * The placeholder avatar for an id with no picture: a filled circle in the
  * id's own colour, as a data URI so it needs no network and passes the
- * frame's `img-src 'self' data: blob:` CSP.
+ * frame's `img-src 'self' data: blob:` CSP. Byte-identical to the platform's.
  */
 export function avatarDataUri(id: string): string {
-  const svg =
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">' +
-    `<circle cx="32" cy="32" r="32" fill="${colorForId(id)}"/></svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  return avatarForColor(colorForId(id));
+}
+
+export function avatarForColor(color: string): string {
+  return (
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 2'%3E" +
+    `%3Ccircle cx='1' cy='1' r='1' fill='${encodeURIComponent(color)}'/%3E%3C/svg%3E`
+  );
 }
 
 /**

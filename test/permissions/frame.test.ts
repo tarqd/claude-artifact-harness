@@ -184,17 +184,17 @@ describe("validation rejects, never throws", () => {
   it("refuses a bad name without a round trip", async () => {
     const { permissions, host } = brokered();
     expect(await failure(permissions.state(7 as unknown as string))).toEqual({
-      code: "invalid_content",
+      code: "bad_request",
       message: "a capability name must be a string",
     });
     expect(await failure(permissions.state("x".repeat(513)))).toMatchObject({
-      code: "invalid_content",
+      code: "bad_request",
     });
     expect(await failure(permissions.request("sample" as unknown as string[]))).toMatchObject({
-      code: "invalid_content",
+      code: "bad_request",
     });
     expect(await failure(permissions.request(new Array(33).fill("db")))).toMatchObject({
-      code: "invalid_content",
+      code: "bad_request",
       message: "request takes at most 32 names",
     });
     expect(host.sent).toEqual([]);
@@ -217,7 +217,7 @@ describe("a view with nothing to govern", () => {
   it("still validates its arguments the same way", async () => {
     const { permissions } = local();
     expect(await failure(permissions.state(7 as unknown as string))).toMatchObject({
-      code: "invalid_content",
+      code: "bad_request",
     });
   });
 });

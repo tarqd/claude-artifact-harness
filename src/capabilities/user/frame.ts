@@ -290,7 +290,9 @@ export function createUser(ctx: FrameContext, options: CreateUserOptions = {}): 
   const avatarUrl = pipe.wrap("avatarUrl", async (): Promise<string | null> => {
     if (config.id === null) return null;
     const profile = await fetchSelfProfile();
-    return profile?.avatarUrl ?? avatarDataUri(config.id);
+    // The platform's module answers the profile's picture or null here; only
+    // `me()` and `profiles()` fill in the placeholder circle.
+    return profile?.avatarUrl ?? null;
   });
 
   const email = pipe.wrap("email", (): Promise<string | null> => fetchSelfEmail());

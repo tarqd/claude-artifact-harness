@@ -85,6 +85,19 @@ Playwright uses the preinstalled Chromium at `/opt/pw-browsers/chromium`
 (`playwright.config.ts` falls back to it when the pinned revision is not
 installed). Never run `playwright install` in this environment.
 
+## Conformance against the platform's runtime
+
+```
+scripts/fetch-runtime.sh <artifact-uuid> <served-artifact.html>   # into reference/runtime (gitignored)
+npm run e2e:conformance                                            # RUNTIME_DIR=reference/runtime
+```
+
+The second command runs the same specs with claude.ai's own `/_runtime/*.js`
+modules and preamble served in place of ours, so the fixtures reach our shell
+through Anthropic's code. It passes 38 of 38; the handful of assertions that
+describe extras only our runtime provides are gated on `FOREIGN_RUNTIME`
+(`e2e/foreign.ts`). See docs/design.md, "Conformance", for what it proved.
+
 ## Origins
 
 | What | Where |

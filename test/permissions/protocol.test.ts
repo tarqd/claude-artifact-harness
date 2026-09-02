@@ -36,12 +36,12 @@ describe("state(name?) validation", () => {
 
   it("refuses a non-string, an empty name and an over-long name", () => {
     expect(thrown(() => validateStateName(7))).toEqual({
-      code: "invalid_content",
+      code: "bad_request",
       message: "a capability name must be a string",
     });
-    expect(thrown(() => validateStateName(""))).toMatchObject({ code: "invalid_content" });
+    expect(thrown(() => validateStateName(""))).toMatchObject({ code: "bad_request" });
     expect(thrown(() => validateStateName("x".repeat(MAX_NAME_LENGTH + 1)))).toEqual({
-      code: "invalid_content",
+      code: "bad_request",
       message: "a capability name must be at most 512 characters",
     });
   });
@@ -64,19 +64,19 @@ describe("request(names?) validation", () => {
 
   it("refuses a non-array, too many names and a non-string entry", () => {
     expect(thrown(() => validateRequestNames("sample"))).toEqual({
-      code: "invalid_content",
+      code: "bad_request",
       message: "request takes an array of capability names",
     });
     expect(thrown(() => validateRequestNames(new Array(MAX_NAMES + 1).fill("db")))).toEqual({
-      code: "invalid_content",
+      code: "bad_request",
       message: "request takes at most 32 names",
     });
     expect(thrown(() => validateRequestNames(["db", 3]))).toMatchObject({
-      code: "invalid_content",
+      code: "bad_request",
     });
     // `null` inside the array is a name, not "no name".
     expect(thrown(() => validateRequestNames(["db", null]))).toMatchObject({
-      code: "invalid_content",
+      code: "bad_request",
     });
   });
 

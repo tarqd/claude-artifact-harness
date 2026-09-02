@@ -19,7 +19,7 @@ plus the scoped-name notes in `reference/contract/0.2.32/mcp.d.ts`.
 Both methods go through `ctx.pipe().wrap`, so they reject and never throw.
 Validation is the documented pair of limits: a name is a non-empty string of
 at most **512** characters, `request` takes at most **32** names (duplicates
-are folded, order kept). A limit failure rejects `invalid_content` without a
+are folded, order kept). A limit failure rejects `bad_request` without a
 round trip. Anything the shell sends that is not one of the four states reads
 as `"unavailable"`, so a page can never see a fifth word.
 
@@ -106,10 +106,12 @@ artifact's consent state, and there is no per-account storage to serve.
    capability is `mcp.callTool`/`watchTool`, which v0 does not serve.
    `CONSENT_CAPS` in `protocol.ts` is the one place to extend.
 6. **Validation code.** A bad name or an over-long list rejects
-   `invalid_content` with a plain message. The platform's code for this is not
-   in the captured surface; pages are told to tolerate any rejection from a
-   permissions read (`.catch(() => "unavailable")`), so the shape matters more
-   than the spelling.
+   `bad_request` with a plain message, the code the platform's own
+   permissions module uses ("state takes no arguments or one capability
+   name"); the conformance run against that module pinned it down. Pages
+   are told to tolerate any rejection from a permissions read
+   (`.catch(() => "unavailable")`), so the shape matters more than the
+   spelling.
 
 ## Known gaps
 

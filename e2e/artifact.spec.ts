@@ -4,6 +4,7 @@
  * resolves null (a stub slice), and `publish(html)` mints a new version that
  * the view reloads to.
  */
+import { FOREIGN_RUNTIME } from "./foreign.ts";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -96,8 +97,10 @@ test("the shell serves the artifact, resolves capabilities and publishes", async
   await expect(ns).toHaveAttribute("data-self", "yes");
   await expect(ns).toHaveAttribute("data-db", "no");
   await expect(ns).toHaveAttribute("data-frozen", "yes");
-  // one namespace object, mounted under both names
-  await expect(ns).toHaveAttribute("data-same", "yes");
+  // One namespace object, mounted under both names. The contract only
+  // promises "the same namespace"; the platform's runtime freezes a separate
+  // copy per name, so identity is our runtime's extra.
+  if (!FOREIGN_RUNTIME) await expect(ns).toHaveAttribute("data-same", "yes");
   await expect(frame(page).locator("#count")).toHaveText("0");
 
   // The preamble's own guarantees, checked inside the frame.
@@ -129,8 +132,10 @@ test("the shell serves the artifact, resolves capabilities and publishes", async
   expect(guarantees.unknownNull).toBeNull();
   expect(guarantees.rtcGone).toBe("undefined"); // WebRTC lockdown
   expect(["light", "dark"]).toContain(guarantees.theme);
-  // the legacy chat-artifact wrapper exists and fails cleanly without `sample`
-  expect(guarantees.completeCode).toBe("capability_disabled");
+  // The legacy chat-artifact wrapper exists and fails cleanly without
+  // `sample`. The platform's published-artifact preamble has no `complete()`
+  // at all (the call throws a TypeError), so this is ours alone.
+  expect(guarantees.completeCode).toBe(FOREIGN_RUNTIME ? "unknown" : "capability_disabled");
 
   // Every namespace method rejects with its own code, never a wrapper's.
   const codes = await content!.evaluate(async () => {
@@ -152,8 +157,13 @@ test("the shell serves the artifact, resolves capabilities and publishes", async
       publishNumber: await outcome(() => ns.publish!(7)),
     };
   });
-  expect(codes.edit).toBe("capability_disabled: live-doc editing is not available in this view");
-  expect(codes.sync).toBe("capability_disabled: live-doc editing is not available in this view");
+  // Our module refuses live-doc verbs as `capability_disabled` (v0 serves no
+  // live docs). The platform's module, under the `artifact-sync-reject`
+  // change id the shell sends, refuses them on a page with no sync region as
+  // `invalid_content` ("this artifact is not a live doc ...").
+  const liveDocRefusal = FOREIGN_RUNTIME ? /^invalid_content: / : /^capability_disabled: /;
+  expect(codes.edit).toMatch(liveDocRefusal);
+  expect(codes.sync).toMatch(liveDocRefusal);
   expect(codes.publishNumber).toBe(
     "invalid_content: publish takes an HTML string or an object mapping file paths to contents",
   );

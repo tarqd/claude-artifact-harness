@@ -13,7 +13,8 @@
     "start": "tsx src/server/main.ts",
     "publish": "tsx scripts/publish.ts",
     "test": "vitest run",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "e2e:conformance": "RUNTIME_DIR=reference/runtime playwright test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.0",

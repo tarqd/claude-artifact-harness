@@ -101,7 +101,11 @@
       note(membersEl, 'name', all[2] === me.name ? 'match' : 'differs');
       note(membersEl, 'owner', all[3] === me.isOwner ? 'match' : 'differs');
       note(membersEl, 'canedit', all[4] === me.canEdit ? 'match' : 'differs');
-      note(membersEl, 'avatar', all[5] === me.avatarUrl ? 'match' : 'differs');
+      // avatarUrl() is the profile's own picture or null; me() falls back to
+      // the placeholder circle, so a viewer without a picture differs by design.
+      var avatarOk = all[5] === me.avatarUrl ||
+        (all[5] === null && typeof me.avatarUrl === 'string' && me.avatarUrl.indexOf('data:image/svg+xml') === 0);
+      note(membersEl, 'avatar', avatarOk ? 'match' : 'differs');
       note(membersEl, 'email', all[6] === me.email ? 'match' : 'differs');
       membersEl.textContent = 'individual members read';
     });

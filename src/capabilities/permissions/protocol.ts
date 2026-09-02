@@ -58,7 +58,7 @@ export function normalizeName(name: string): string {
 }
 
 const INVALID_NAME = (): never => {
-  throw capError("invalid_content", "a capability name must be a string");
+  throw capError("bad_request", "a capability name must be a string");
 };
 
 /** Validate the optional argument of `state(name?)`. */
@@ -67,11 +67,11 @@ export function validateStateName(input: unknown): string | undefined {
   if (typeof input !== "string") INVALID_NAME();
   const name = input as string;
   if (name.length === 0) {
-    throw capError("invalid_content", "a capability name must not be empty");
+    throw capError("bad_request", "a capability name must not be empty");
   }
   if (name.length > MAX_NAME_LENGTH) {
     throw capError(
-      "invalid_content",
+      "bad_request",
       `a capability name must be at most ${MAX_NAME_LENGTH} characters`,
     );
   }
@@ -86,17 +86,17 @@ export function validateStateName(input: unknown): string | undefined {
 export function validateRequestNames(input: unknown): string[] | undefined {
   if (input === undefined || input === null) return undefined;
   if (!Array.isArray(input)) {
-    throw capError("invalid_content", "request takes an array of capability names");
+    throw capError("bad_request", "request takes an array of capability names");
   }
   if (input.length > MAX_NAMES) {
-    throw capError("invalid_content", `request takes at most ${MAX_NAMES} names`);
+    throw capError("bad_request", `request takes at most ${MAX_NAMES} names`);
   }
   const out: string[] = [];
   const seen = new Set<string>();
   for (const entry of input) {
     const name = validateStateName(entry);
     if (name === undefined) {
-      throw capError("invalid_content", "a capability name must be a string");
+      throw capError("bad_request", "a capability name must be a string");
     }
     if (seen.has(name)) continue;
     seen.add(name);

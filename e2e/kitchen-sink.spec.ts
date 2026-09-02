@@ -9,6 +9,7 @@
  * legacy `claude.complete()` wrapper reaching the `sample` backend, and the
  * consent key `sample` writes being the one `permissions` reads back.
  */
+import { FOREIGN_RUNTIME } from "./foreign.ts";
 import { expect, test, type Page } from "@playwright/test";
 import { request as httpRequest } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -168,24 +169,28 @@ test("every capability resolves and works on one page", async ({ page }) => {
   await expect(page.locator(".shell-consent")).toHaveCount(0);
 
   // 3. The legacy chat-artifact API: `claude.complete()` over `sample`,
-  //    through the consent dialog and the fake backend.
-  await frame(page).locator("#legacy").click();
-  const dialog = page.locator(".shell-consent");
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Allow" }).click();
+  //    through the consent dialog and the fake backend. The platform's
+  //    published-artifact preamble has no `complete()`, so steps 3 and 4 are
+  //    ours alone.
+  if (!FOREIGN_RUNTIME) {
+    await frame(page).locator("#legacy").click();
+    const dialog = page.locator(".shell-consent");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Allow" }).click();
 
-  const out = frame(page).locator("#legacy-out");
-  await expect(out).toHaveAttribute("data-state", "done", { timeout: 20_000 });
-  await expect(out).toHaveText(/^echo #\d+ \(default\): kitchen sink$/);
+    const out = frame(page).locator("#legacy-out");
+    await expect(out).toHaveAttribute("data-state", "done", { timeout: 20_000 });
+    await expect(out).toHaveText(/^echo #\d+ \(default\): kitchen sink$/);
 
-  // 4. Cross-slice: `sample` recorded the answer under the shared key, and
-  //    `permissions` reads that same key back rather than asking again.
-  expect(await page.evaluate((key) => localStorage.getItem(key), `consent:${id}:sample`)).toBe(
-    "granted",
-  );
-  await frame(page).locator("#perm").click();
-  await expect(frame(page).locator("#perm-sample")).toHaveAttribute("data-value", "granted");
-  await expect(dialog).toHaveCount(0);
+    // 4. Cross-slice: `sample` recorded the answer under the shared key, and
+    //    `permissions` reads that same key back rather than asking again.
+    expect(await page.evaluate((key) => localStorage.getItem(key), `consent:${id}:sample`)).toBe(
+      "granted",
+    );
+    await frame(page).locator("#perm").click();
+    await expect(frame(page).locator("#perm-sample")).toHaveAttribute("data-value", "granted");
+    await expect(dialog).toHaveCount(0);
+  }
 
   await expect(frame(page).locator("#errors")).toHaveAttribute("data-count", "0");
   expect(errors).toEqual([]);

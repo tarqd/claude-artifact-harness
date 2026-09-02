@@ -134,7 +134,7 @@ test("state before a request, the prompt, and state after it", async ({ page }) 
   // The documented limit is enforced, and rejects rather than throwing.
   await frame(page).locator("#request-bad").click();
   await expect(frame(page).locator("#result")).toHaveAttribute("data-state", "error");
-  await expect(frame(page).locator("#result")).toHaveAttribute("data-value", "error:invalid_content");
+  await expect(frame(page).locator("#result")).toHaveAttribute("data-value", "error:bad_request");
 
   expect(errors).toEqual([]);
 });

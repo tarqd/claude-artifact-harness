@@ -123,6 +123,35 @@ Admin API on the shell origin for tooling: `POST /api/artifacts` (create from HT
 - RPC id prefixes are owned by `src/protocol/capabilities.ts` (`CAP_ID_PREFIXES`); `createRpc` derives them from the cap name, and `RpcOptions.onTimeout` lets a slice choose its timeout outcome.
 - One `BrokerContext` per mounted view; brokers may export `dispose`.
 
+## Conformance against the platform's own runtime
+
+`npm run e2e:conformance` runs the whole Playwright suite with
+`RUNTIME_DIR=reference/runtime`: the server then serves the platform's own
+`/_runtime/*.js` modules and inlines the platform's preamble (with
+`__FRAME_PREAMBLE.origins` pointed at our shell) instead of our clean-room
+runtime, so every fixture page talks to our shell through Anthropic's code.
+The files come from `scripts/fetch-runtime.sh <uuid> <served.html>` and are
+gitignored.
+
+What the run established (2026-09-02, contract 0.2.32, 38 of 38 specs):
+
+- The wire protocol matches: handshake, `__frame_cap` envelope, ack and
+  progress, the db and room push channels, downloads transfer, assets,
+  permissions, network, user.
+- Fidelity fixes it forced on our side: the shell now sends
+  `changes: ["db-path-call-site"]` (the platform's db module validates paths
+  at the call site only under that change id); `permissions` validation
+  rejects `bad_request`, the platform's code; the `user` palette, hash and
+  avatar data URI are now the platform's byte for byte, and `avatarUrl()`
+  answers `null` for a profile with no picture (only `me()` and `profiles()`
+  fill in the placeholder).
+- Guarantees only our runtime makes, gated on `FOREIGN_RUNTIME` in the specs:
+  `use("artifact") === use("self")` object identity (the platform freezes one
+  copy per name), the legacy `window.claude.complete()` (absent from the
+  platform's published-artifact preamble), and an ArrayBuffer handed to
+  `downloads.save` being detached synchronously (the platform detaches a
+  microtask later; the fixture now checks on the next task).
+
 ## Testing bar
 
 - Unit tests per slice with vitest (path grammar, validation, broker mapping, store behaviour).

@@ -326,16 +326,16 @@ describe("refusals", () => {
     const ctx = context();
     await expect(
       handle({ cap: "permissions", id: "p1", method: "state", args: ["x".repeat(513)] }, ctx),
-    ).rejects.toMatchObject({ code: "invalid_content" });
+    ).rejects.toMatchObject({ code: "bad_request" });
     await expect(
       handle(
         { cap: "permissions", id: "p2", method: "request", args: [new Array(33).fill("db")] },
         ctx,
       ),
-    ).rejects.toMatchObject({ code: "invalid_content", message: "request takes at most 32 names" });
+    ).rejects.toMatchObject({ code: "bad_request", message: "request takes at most 32 names" });
     await expect(
       handle({ cap: "permissions", id: "p3", method: "request", args: ["sample"] }, ctx),
-    ).rejects.toMatchObject({ code: "invalid_content" });
+    ).rejects.toMatchObject({ code: "bad_request" });
   });
 });
 
@@ -368,7 +368,7 @@ describe("through the shell dispatcher", () => {
       context(),
     );
     expect(reply.error).toEqual({
-      code: "invalid_content",
+      code: "bad_request",
       message: "a capability name must be a string",
     });
   });

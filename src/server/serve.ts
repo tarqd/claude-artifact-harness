@@ -329,6 +329,21 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
 
   app.get("/_runtime/:file", async (c) => {
     const file = c.req.param("file");
+    const external = ctx.config.runtimeDir;
+    if (external) {
+      // Conformance mode: any module of the foreign runtime, by its own name.
+      if (!/^[\w.-]+\.js$/.test(file) || file === "preamble.js") return c.text("not found", 404);
+      let source: string;
+      try {
+        source = await readFile(join(external, file), "utf8");
+      } catch {
+        return c.text("not found", 404);
+      }
+      return c.body(source, 200, {
+        "content-type": "text/javascript; charset=utf-8",
+        "cache-control": "no-cache",
+      });
+    }
     const allowed = new Set(Object.values(runtimeModuleMap()));
     if (!allowed.has(file)) return c.text("not found", 404);
     const source = await readDist(ctx, "runtime", file);
@@ -359,13 +374,29 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
     if (!file) return c.text("not found", 404);
 
     if (file.contentType.startsWith("text/html")) {
-      const preambleSource = await readDist(ctx, "frame", "preamble.js");
-      if (preambleSource === null) return c.text(BUILD_HINT, 500);
-      const preambleConfig: FramePreambleConfig = {
-        v: 1,
-        capabilities: runtimeModuleMap(),
-        origins: [ctx.shellOrigin],
-      };
+      let preambleSource: string | null;
+      let preambleConfig: FramePreambleConfig;
+      const external = ctx.config.runtimeDir;
+      if (external) {
+        // Conformance mode: the foreign runtime's own preamble and module map,
+        // with only the allowed shell origin swapped for ours.
+        try {
+          preambleSource = await readFile(join(external, "preamble.js"), "utf8");
+          const raw = JSON.parse(await readFile(join(external, "preamble-config.json"), "utf8")) as
+            Record<string, unknown>;
+          preambleConfig = { ...raw, v: 1, origins: [ctx.shellOrigin] } as FramePreambleConfig;
+        } catch {
+          return c.text(`the external runtime in ${external} is incomplete`, 500);
+        }
+      } else {
+        preambleSource = await readDist(ctx, "frame", "preamble.js");
+        if (preambleSource === null) return c.text(BUILD_HINT, 500);
+        preambleConfig = {
+          v: 1,
+          capabilities: runtimeModuleMap(),
+          origins: [ctx.shellOrigin],
+        };
+      }
       const html = buildEnvelope(file.body.toString("utf8"), { preambleConfig, preambleSource });
       return c.body(html, 200, {
         "content-type": "text/html; charset=utf-8",

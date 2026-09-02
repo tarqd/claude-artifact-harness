@@ -88,7 +88,14 @@ export function buildShellBoot(input: BuildBootInput): ShellBoot {
     frameOrigin: origin,
     frameUrl,
     contract: CONTRACT_VERSION,
-    changes: [],
+    // Feature-change ids the platform's runtime modules key behaviour on
+    // (surface-area.md §3, §5.9 and §6). `db-path-call-site` makes the
+    // platform's db module validate path grammar at the call site, as ours
+    // always does; `artifact-sync-reject` makes its artifact module refuse
+    // `edit`/`sync` on a page with no live-doc sync region instead of
+    // running `sync(fn)` silently. Ours refuses them as `capability_disabled`
+    // regardless, since v0 serves no live docs.
+    changes: ["db-path-call-site", "artifact-sync-reject"],
     // `artifact_files` is the only flag the platform emits today; a view that
     // cannot write never gets it.
     flags: canEdit ? ["artifact_files"] : [],

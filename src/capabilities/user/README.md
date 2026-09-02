@@ -39,8 +39,10 @@ Implemented as documented:
 - **Deterministic identity for unresolved ids.** A hash of the id picks one
   of six swatches and a data-URI circle avatar (`identity.ts`), so an id the
   directory cannot resolve still renders, and renders the same way every
-  time, on every side. A profile with no stored picture gets the same
-  placeholder rather than `null`.
+  time, on every side. `me()` and `profiles()` fill in that placeholder for a
+  profile with no stored picture; `avatarUrl()` alone answers `null` then,
+  as the platform's module does. The palette, hash and data URI are the
+  platform's own, byte for byte (pinned by the conformance run).
 - **Cache until the tab comes back.** Resolved profiles (the viewer's own
   included) are cached and dropped on `visibilitychange` when the document
   is visible again, so a page left open overnight redraws with current names.

@@ -7,6 +7,7 @@ import {
   avatarDataUri,
   colorForId,
   hashId,
+  NO_ID_COLOR,
   MAX_NAME_CHARS,
   MAX_PROFILE_IDS,
   normalizeIds,
@@ -32,8 +33,16 @@ describe("colour", () => {
     expect(seen.size).toBe(SWATCHES.length);
   });
 
-  it("gives the empty id a colour too (a viewer with no id still renders)", () => {
-    expect(SWATCHES).toContain(colorForId(""));
+  it("gives the empty id the platform's grey (a viewer with no id still renders)", () => {
+    expect(colorForId("")).toBe(NO_ID_COLOR);
+    expect(SWATCHES).not.toContain(NO_ID_COLOR);
+  });
+
+  it("matches the platform's palette and hash byte for byte", () => {
+    // Values observed from claude.ai's own user module in the conformance run.
+    expect(SWATCHES).toEqual(["#62744c", "#b04e72", "#5b7596", "#a3651f", "#7a6ba8", "#3f7a75"]);
+    expect(hashId("u_Lr4CtRbEG4gARRuph7UM1Z") % 6).toBe(2);
+    expect(colorForId("u_Lr4CtRbEG4gARRuph7UM1Z")).toBe("#5b7596");
   });
 
   it("hashes to a non-negative 32-bit value", () => {
@@ -49,14 +58,15 @@ describe("colour", () => {
 describe("avatarDataUri", () => {
   it("is a self-contained SVG circle in the id's colour", () => {
     const uri = avatarDataUri(ID);
-    expect(uri.startsWith("data:image/svg+xml;charset=utf-8,")).toBe(true);
-    const svg = decodeURIComponent(uri.slice("data:image/svg+xml;charset=utf-8,".length));
+    expect(uri.startsWith("data:image/svg+xml,")).toBe(true);
+    const svg = decodeURIComponent(uri.slice("data:image/svg+xml,".length));
     expect(svg).toContain("<circle");
     expect(svg).toContain(colorForId(ID));
     // It must be safe to drop straight into an `src` attribute.
+    // (Spaces inside the single-quoted viewBox are the platform's own form;
+    // browsers accept them in a data: src.)
     expect(uri).not.toContain('"');
     expect(uri).not.toContain("<");
-    expect(uri).not.toContain(" ");
   });
 
   it("is stable for one id and different for another", () => {

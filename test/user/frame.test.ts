@@ -191,11 +191,12 @@ describe("profile-backed members", () => {
     expect(host.sent).toHaveLength(1);
   });
 
-  it("fall back to the deterministic avatar when the profile has no picture", async () => {
+  it("answer null when the profile has no picture (only me() fills in the circle)", async () => {
     const { user, host } = makeUser();
     const pending = user.avatarUrl();
     host.reply(0, { id: OWNER, name: "Ada", avatarUrl: null });
-    await expect(pending).resolves.toBe(avatarDataUri(OWNER));
+    await expect(pending).resolves.toBeNull();
+    await expect(user.me()).resolves.toMatchObject({ avatarUrl: avatarDataUri(OWNER) });
   });
 
   it("prefer a stored picture when there is one", async () => {
@@ -385,7 +386,7 @@ describe("one call for concurrent readers", () => {
     host.reply(1, { email: "ada@example.test" });
     const [name, avatar, me, email] = await all;
     expect(name).toBe("Ada");
-    expect(avatar).toBe(avatarDataUri(OWNER));
+    expect(avatar).toBeNull();
     expect(me).toMatchObject({ name: "Ada", email: "ada@example.test" });
     expect(email).toBe("ada@example.test");
     expect(host.sent).toHaveLength(2);

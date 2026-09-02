@@ -16,6 +16,13 @@ export interface ServerConfig {
   frameHostSuffix: string;
   dataDir: string;
   distDir: string;
+  /**
+   * Conformance mode: serve `/_runtime/*.js` and the inline preamble from this
+   * directory instead of `dist/` (e.g. `reference/runtime`, holding the
+   * platform's own modules fetched by `scripts/fetch-runtime.sh`, plus
+   * `preamble.js` and `preamble-config.json`). `null` serves our runtime.
+   */
+  runtimeDir: string | null;
   /** HMAC secret for cookies and asset tokens. */
   secret: string;
   /** Address the two apps bind to. Loopback unless `BIND_HOST` says otherwise. */
@@ -61,6 +68,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     frameHostSuffix: process.env.FRAME_HOST_SUFFIX ?? "localhost",
     dataDir: resolve(process.env.DATA_DIR ?? "./data"),
     distDir: resolve(process.env.DIST_DIR ?? "./dist"),
+    runtimeDir: process.env.RUNTIME_DIR ? resolve(process.env.RUNTIME_DIR) : null,
     secret: process.env.ARTIFACT_SECRET ?? randomBytes(32).toString("hex"),
     bindHost: process.env.BIND_HOST ?? "127.0.0.1",
     ownerToken: process.env.ARTIFACT_OWNER_TOKEN ?? null,
