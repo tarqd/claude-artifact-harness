@@ -71,6 +71,19 @@ server, redirects included; point a server at its final URL.
 store would implement later: nothing in the broker, the routes or the frame
 knows that today's directory ignores `viewerId`.
 
+**The credential is the operator's, and every viewer spends it.** With
+`ARTIFACT_DEFAULT_LEVEL=interact` (the default) anyone who can open a
+published artifact is an `interact` viewer, so the artifact's manifest is the
+whole gate on those connectors: every `(server, tool)` in it, writes
+included, is reachable by any visitor after one consent dialog of their own.
+The lanes take only a browser the shell page has already given a viewer
+cookie to — a cookie-less HTTP client is `not_granted` and no identity is
+minted for it — but that is a cookie anyone can obtain by loading the page.
+On a server past loopback (`BIND_HOST`), set `ARTIFACT_DEFAULT_LEVEL=view`
+when connectors are configured: `view` refuses both lanes, so only the owner
+calls them. The server warns at boot when it is bound out, the default level
+is not `view`, and a connector or an API key is configured.
+
 The fake directory serves three connectors: **Fake Tools** (`echo`, a
 declared read; `write`, a declared write; `plain`, unannotated; `fail`,
 which reports a tool-level failure; `slow`, `flaky`, `image`), **Needs
@@ -157,12 +170,15 @@ under `mcp`, frozen.
 routes accept only the shell page's own requests (`application/json`, and
 neither a `Sec-Fetch-Site` nor an `Origin` naming another site — a
 cross-site "simple" POST would otherwise run a tool with no dialog, cookie
-or not), require the artifact to declare `mcp` and the viewer to be able
-to interact (`view` → `not_granted`), and meter the body against a 512 KiB
-cap as it streams. `/servers` answers the manifest intersected with the
-directory: a server the directory does not know or a `host:` one is
-omitted; a server that fails to list answers with an empty tool set and its
-auth status. `/call` re-checks the manifest, refuses `host:` servers and
+or not), require a viewer cookie the request already carries
+(`auth.existingViewer`, which mints nothing: a connector call spends the
+operator's credential, so a bare client with an artifact id is
+`not_granted` rather than a fresh `interact` viewer), require the artifact
+to declare `mcp` and that viewer to be able to interact (`view` →
+`not_granted`), and meter the body against a 512 KiB cap as it streams.
+`/servers` answers the manifest intersected with the directory: a server
+the directory does not know or a `host:` one is omitted; a server that
+fails to list answers with an empty tool set and its auth status. `/call` re-checks the manifest, refuses `host:` servers and
 non-object arguments, holds at most 8 calls per viewer and 64 in flight
 server-wide (`rate_limited`), gives a call 120 s and aborts it when the
 client goes away, refuses a result over 4 MB, and maps every failure to a

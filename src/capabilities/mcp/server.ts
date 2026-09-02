@@ -7,11 +7,13 @@
  * Everything the page API promises is re-checked here — this route, not the
  * shell page, is what a direct HTTP caller meets: the request must come from
  * the shell origin itself (consent lives there, and a connector call has
- * side effects), the artifact must declare `mcp`, the `(server, tool)` must
- * be in its manifest, `host:` servers are never run by a service, the viewer
- * must be able to interact, and the connector comes from the directory
- * (`directory.ts`), never from the request. Results go back as the connector
- * produced them plus the one header the broker reads, `X-Frame-Mcp-No-Store`.
+ * side effects), it must carry a viewer session already (nothing is minted
+ * here: the connector spends the operator's credential), the artifact must
+ * declare `mcp`, the `(server, tool)` must be in its manifest, `host:`
+ * servers are never run by a service, the viewer must be able to interact,
+ * and the connector comes from the directory (`directory.ts`), never from
+ * the request. Results go back as the connector produced them plus the one
+ * header the broker reads, `X-Frame-Mcp-No-Store`.
  */
 import type { Context } from "hono";
 import type { StatusCode } from "hono/utils/http-status";
@@ -179,6 +181,15 @@ interface Gate {
 
 /** Resolve the artifact, its manifest and the asking viewer, or refuse. */
 async function gate(c: Context, ctx: ServerContext, body: Record<string, unknown>): Promise<Gate> {
+  // A connector runs on the operator's credential, which every viewer shares,
+  // so the caller has to be a browser that has already opened an artifact:
+  // `auth.viewer()` would mint an identity for a cookie-less request and hand
+  // it the default level, turning a published manifest into a public API onto
+  // the connector. The shell page's own fetches carry the cookie.
+  const viewer = ctx.auth.existingViewer(c);
+  if (!viewer) {
+    refuse(403, "not_granted", "connector calls need a viewer session; open the artifact page first");
+  }
   const artifactId = body.artifactId;
   if (typeof artifactId !== "string" || !isArtifactId(artifactId)) {
     refuse(400, "bad_request", "bad artifact id");
@@ -187,7 +198,6 @@ async function gate(c: Context, ctx: ServerContext, body: Record<string, unknown
   if (!meta) refuse(404, "not_declared", "no such artifact");
   const declared = meta.capabilities.mcp;
   if (!declared) refuse(400, "not_declared", "this artifact does not declare mcp");
-  const viewer = ctx.auth.viewer(c);
   const level = ctx.auth.levelFor(viewer, meta);
   if (level === "view") refuse(403, "not_granted", "this viewer may not use connectors here");
   return { meta, manifest: readManifest(declared.config), viewerId: viewer.id };

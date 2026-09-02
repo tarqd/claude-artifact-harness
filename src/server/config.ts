@@ -82,6 +82,39 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
   return config;
 }
 
+/** Loopback: a server bound here is reachable only from this machine. */
+function isLoopbackHost(host: string): boolean {
+  const bare = host.trim().toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+  return bare === "localhost" || bare === "::1" || bare === "::ffff:127.0.0.1" || /^127\./.test(bare);
+}
+
+/**
+ * Lines to print at boot when the configuration puts the operator's
+ * credentials behind nothing. `ARTIFACT_DEFAULT_LEVEL=interact` — the
+ * default — makes every visitor an `interact` viewer, and `interact` buys
+ * the capability calls: `sample` spends `ANTHROPIC_API_KEY`, `mcp` spends
+ * whatever `MCP_SERVERS` authenticates with, and both are shared by every
+ * viewer. On loopback the visitor is the operator, so this is silent; once
+ * `BIND_HOST` reaches further, anyone who can open a published artifact can
+ * spend those credentials, and the operator is told so.
+ */
+export function exposureWarnings(
+  config: ServerConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  if (isLoopbackHost(config.bindHost)) return [];
+  if (config.defaultLevel === "view") return [];
+  const assets: string[] = [];
+  if (env.ANTHROPIC_API_KEY?.trim()) assets.push("ANTHROPIC_API_KEY");
+  if (env.MCP_SERVERS?.trim() || env.MCP_SERVERS_FILE?.trim()) assets.push("MCP_SERVERS");
+  if (assets.length === 0) return [];
+  return [
+    `warn   BIND_HOST=${config.bindHost} with ARTIFACT_DEFAULT_LEVEL=${config.defaultLevel} and ${assets.join(" and ")} set:`,
+    `warn   every visitor of a published artifact gets ${config.defaultLevel} and may spend those credentials.`,
+    "warn   Set ARTIFACT_DEFAULT_LEVEL=view (only the owner then reaches sample and mcp), or stay on loopback.",
+  ];
+}
+
 export function shellOrigin(config: ServerConfig, port = config.shellPort): string {
   return `http://${config.shellHost}:${port}`;
 }

@@ -1,6 +1,7 @@
 /**
  * `npm run dev` / `npm start` entry point.
  */
+import { exposureWarnings } from "./config.ts";
 import { startServer } from "./index.ts";
 
 const server = await startServer();
@@ -14,6 +15,7 @@ if (!server.config.ownerToken && !server.config.openAdminApi) {
     "admin  no ARTIFACT_OWNER_TOKEN and no ARTIFACT_OPEN_ADMIN=1: the admin API is closed",
   );
 }
+for (const line of exposureWarnings(server.config)) console.warn(line);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
