@@ -49,12 +49,25 @@ export type HostKind = "shell" | "frame";
  */
 const LOOPBACK = new Set(["127.0.0.1", "::1"]);
 
-/** Content types a browser may send cross-site with no preflight. */
+/**
+ * The whole CORS-safelist for `Content-Type`: what a browser may send
+ * cross-site with no preflight. Only the upload lane below is judged by this
+ * list — every other route takes `application/json` and nothing else.
+ */
 const NO_PREFLIGHT_TYPES = new Set([
   "text/plain",
   "application/x-www-form-urlencoded",
   "multipart/form-data",
 ]);
+
+/**
+ * The one lane that legitimately posts something other than JSON: an `assets`
+ * upload carries the blob's own media type (`capabilities/assets/server.ts`).
+ * It is held to the rule the JSON allowlist stands for rather than to the
+ * allowlist itself — a type a forged cross-site form could have sent is still
+ * refused, and the slice's own `ACCEPTED_TYPES` refuses everything else.
+ */
+const UPLOAD_LANE = /^\/api\/frame\/blob\/[^/]+\/upload$/;
 
 /**
  * `Host` → the hostname alone: lowercased, port removed, an IPv6 literal
@@ -144,16 +157,19 @@ function originIsSelf<E extends Env>(c: Context<E>, ctx: ServerContext): boolean
  *   CSRF above; `cross-site` is any other page.
  * - `Origin`, when sent, must be this origin (see `originIsSelf`).
  * - When *neither* header is present — an old browser, or a bare client —
- *   the content type must be one a browser could not have sent cross-site
- *   without a preflight this server would fail. So `application/json` (every
- *   JSON lane) and `image/png` (an `assets` upload) pass, while the
- *   `text/plain` a forged form or a "simple" `fetch` would carry does not.
+ *   the content type must be `application/json`. Anything else is refused
+ *   415, including the `text/plain` a forged form or a "simple" `fetch`
+ *   carries and the `text/ping` an `<a ping>` sends: a caller that says
+ *   nothing about where it came from gets the one type no browser can send
+ *   cross-site without a preflight this server would fail.
  *
- * The last rule is why this is not a flat "every POST must be
- * `application/json`": the `assets` upload lane posts the blob's own media
- * type, and `text/plain` is one of the accepted asset types — it is accepted
- * from the shell page, which sends an `Origin`, and refused from a caller
- * that proves nothing.
+ * The single exemption is the `assets` upload lane, which posts the blob's
+ * own media type: there the CORS-safelisted encodings (and a missing type)
+ * are refused instead, which is the same invariant stated the other way
+ * round, and the slice's accepted-type list does the rest. So `image/png`
+ * uploads from `curl` still work, while `text/plain` — an accepted asset
+ * type, and one a forged form could send — is taken only from a caller that
+ * proves its origin.
  */
 export function originGuard<E extends Env>(ctx: ServerContext): MiddlewareHandler<E> {
   return async (c, next) => {
@@ -169,11 +185,17 @@ export function originGuard<E extends Env>(ctx: ServerContext): MiddlewareHandle
     if (!originIsSelf(c, ctx)) return deny(c);
     if (site === undefined && c.req.header("origin") === undefined) {
       const type = (c.req.header("content-type") ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
-      if (type === "" || NO_PREFLIGHT_TYPES.has(type)) {
+      const upload = UPLOAD_LANE.test(c.req.path);
+      const accepted = upload
+        ? type !== "" && !NO_PREFLIGHT_TYPES.has(type)
+        : type === "application/json";
+      if (!accepted) {
         return c.json(
           {
             code: "invalid_content",
-            message: `${type === "" ? "a" : `a ${type}`} body is not accepted here: send application/json`,
+            message: `${type === "" ? "a" : `a ${type}`} body is not accepted here: send ${
+              upload ? "the asset's own media type" : "application/json"
+            }`,
           },
           415,
         );

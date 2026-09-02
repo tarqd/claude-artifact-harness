@@ -131,9 +131,18 @@ itself: `Sec-Fetch-Site` must be `same-origin` or `none`, and an `Origin`, if
 sent, must be this origin. That is what stops an artifact frame from writing
 the shell API with the viewer's cookie where a deployment puts both under one
 registrable domain. A client that sends neither header — `npm run publish`,
-`curl`, a test — is still served, but its content type must be one a browser
-could not have sent cross-site without a preflight: `application/json` and
-the `assets` media types pass, `text/plain` and the form encodings do not.
+`curl`, a test — is still served, but only with `Content-Type:
+application/json`; every other type is `415`, because a browser can send one
+cross-site with no preflight and this server would never see it coming. The
+one exemption is `POST /api/frame/blob/:id/upload`, which carries the asset's
+own media type: there the three form-and-text encodings a browser may send
+cross-site are refused instead, and the `assets` accepted-type list does the
+rest.
+
+Exposing the server (`BIND_HOST=0.0.0.0`) therefore means naming the
+hostnames it will be reached at: set `SHELL_HOST` and `FRAME_HOST_SUFFIX`, or
+list the extra names in `ARTIFACT_ALLOWED_HOSTS`. A `Host` that is none of
+them gets `403 unknown host`, page loads included.
 
 ## Environment variables
 
@@ -151,7 +160,7 @@ the `assets` media types pass, `text/plain` and the form encodings do not.
 | `ARTIFACT_OPEN_ADMIN` | unset | `1` serves the admin API (create/publish) to callers with no credential — local dev only |
 | `ARTIFACT_PREFIX_HOSTS` | unset | `1` serves the frame origin's `/_a/<artifactId>/…` tooling form on hosts with no artifact label — every artifact reached that way shares one origin |
 | `ARTIFACT_DEFAULT_LEVEL` | `interact` | level for other viewers: `view`, `interact` or `admin`. Only `admin` (and the owner) may publish |
-| `BIND_HOST` | `127.0.0.1` | address both apps listen on; set to `0.0.0.0` to expose them |
+| `BIND_HOST` | `127.0.0.1` | address both apps listen on; set to `0.0.0.0` to expose them, and name the hostnames it is reached at in `SHELL_HOST`/`FRAME_HOST_SUFFIX`/`ARTIFACT_ALLOWED_HOSTS` or every request is `403 unknown host` |
 | `ARTIFACT_TOKEN_TTL` | `1800` | asset-token lifetime, seconds |
 | `VERSION_POLL_MS` | `5000` | how often an open view polls for a new version (0 disables) |
 | `ANTHROPIC_API_KEY` | unset | the key `sample` calls the Anthropic API with. Without it (and without `SAMPLE_BACKEND=fake`) every `sample` call is refused `sampling_disabled` |

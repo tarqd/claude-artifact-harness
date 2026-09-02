@@ -63,10 +63,12 @@ the backend, and folds any undocumented backend code into `upstream_error`.
   since the rest of the body was never read.
 - Shell origin (viewer cookie; `admin` or `owner` to write, and behind the
   spine's origin guard — `src/server/guards.ts` — like every other write here):
-  - `POST /api/frame/blob/:id/upload` — raw body, `Content-Type` header. A
-    caller that sends no `Origin` and no `Sec-Fetch-Site` cannot upload
-    `text/plain`: the guard refuses the content types a forged cross-site form
-    could have sent. Every other accepted type, and any request from the shell
+  - `POST /api/frame/blob/:id/upload` — raw body, `Content-Type` header. This
+    is the one lane exempt from the guard's "a caller that sends no `Origin`
+    and no `Sec-Fetch-Site` must post `application/json`" rule, since the body
+    is the asset itself. Such a caller is instead refused the content types a
+    forged cross-site form could have sent — of the accepted types, that is
+    `text/plain`. Every other accepted type, and any request from the shell
     page, is unaffected.
   - `POST /api/frame/blob/:id/list` — `{after?}` → `{assets, usage, next?}`
   - `POST /api/frame/blob/:id/:blobId/delete` → `{id, deleted}`

@@ -274,7 +274,7 @@ describe("the guards over a socket", () => {
       ).toBe(403);
     });
 
-    it("refuses a body a forged cross-site form could have sent", async () => {
+    it("takes only application/json from a caller that proves nothing", async () => {
       const refused = await raw(
         server.shellPort,
         "POST",
@@ -284,7 +284,14 @@ describe("the guards over a socket", () => {
       );
       expect(refused.status).toBe(415);
       expect(JSON.parse(refused.body)).toMatchObject({ code: "invalid_content" });
-      for (const type of ["application/x-www-form-urlencoded", "multipart/form-data"]) {
+      for (const type of [
+        "application/x-www-form-urlencoded",
+        "multipart/form-data",
+        // Not on the CORS safelist, and sent cross-site with no preflight all
+        // the same: `<a ping>`. An allowlist is the only rule that holds.
+        "text/ping",
+        "application/x-foo",
+      ]) {
         expect(
           (await raw(
             server.shellPort,
@@ -295,6 +302,77 @@ describe("the guards over a socket", () => {
           )).status,
         ).toBe(415);
       }
+      // A body-less route is no exception: the `<a ping>` repro aimed at one.
+      expect(
+        (await raw(server.shellPort, "POST", `/api/frame/blob/${ID}/${ID}/delete`, {
+          host: shellHost,
+          "content-type": "text/ping",
+        })).status,
+      ).toBe(415);
+    });
+
+    it("takes the asset's own media type on the upload lane", async () => {
+      // The one lane that legitimately posts something other than JSON, so
+      // it is judged by what a browser could have sent instead.
+      const created = await raw(
+        server.shellPort,
+        "POST",
+        "/api/artifacts",
+        json(),
+        JSON.stringify({ html, capabilities: { assets: {} } }),
+      );
+      expect(created.status).toBe(200);
+      const withAssets = (JSON.parse(created.body) as { id: string }).id;
+      const upload = `/api/frame/blob/${withAssets}/upload`;
+
+      for (const type of ["image/png", "text/csv"]) {
+        const posted = await raw(
+          server.shellPort,
+          "POST",
+          upload,
+          { host: shellHost, "content-type": type },
+          "asset bytes",
+        );
+        expect(posted.status).toBe(200);
+        expect(JSON.parse(posted.body)).toMatchObject({ type });
+      }
+      // Still not a type a forged cross-site form could have sent, even here.
+      for (const type of ["text/plain", "multipart/form-data"]) {
+        const refused = await raw(
+          server.shellPort,
+          "POST",
+          upload,
+          { host: shellHost, "content-type": type },
+          "asset bytes",
+        );
+        expect(refused.status).toBe(415);
+        expect(JSON.parse(refused.body)).toMatchObject({ code: "invalid_content" });
+      }
+      // A type outside the exemption is the slice's own refusal, not ours.
+      const unsupported = await raw(
+        server.shellPort,
+        "POST",
+        upload,
+        { host: shellHost, "content-type": "application/x-foo" },
+        "asset bytes",
+      );
+      expect(unsupported.status).toBe(415);
+      expect(JSON.parse(unsupported.body)).toMatchObject({ code: "unsupported_type" });
+      // And the shell page's own upload, which does carry the fetch metadata,
+      // is unaffected by the exemption either way.
+      const fromPage = await raw(
+        server.shellPort,
+        "POST",
+        upload,
+        {
+          host: shellHost,
+          "content-type": "text/plain",
+          origin: server.shellOrigin,
+          "sec-fetch-site": "same-origin",
+        },
+        "asset bytes",
+      );
+      expect(fromPage.status).toBe(200);
     });
 
     it("lets the shell page and bare tooling through", async () => {
