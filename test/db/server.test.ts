@@ -293,6 +293,49 @@ describe("a rule declaration that does not compile", () => {
     );
   });
 
+  it("refuses a misspelled rules key, but not a bag the spine owns", async () => {
+    // `rulez` is a whole declaration with one keystroke wrong. It used to
+    // read as "nothing declared", so the store the author locked to `owner`
+    // published clean and took anonymous writes.
+    const misspelled = await create({ db: { rulez: [{ path: "", write: "owner" }] } });
+    expect(misspelled.status).toBe(400);
+    expect(misspelled.body.message).toMatch(/db: unknown db config key "rulez"/);
+
+    // A declaration with no config, and one carrying only spine keys, both
+    // still publish and still run the defaults.
+    for (const capabilities of [{ db: {} }, { db: { optional: true } }]) {
+      const plain = await create(capabilities);
+      expect(plain.status).toBe(200);
+      const anyone = new Client();
+      expect(
+        (await anyone.call(plain.body.id, { verb: "set", path: "t/1", body: { a: 1 } })).status,
+      ).toBe(200);
+    }
+  });
+
+  it("publishes a {self} rule that sets no level", async () => {
+    // "This prefix is private per viewer, levels unchanged" - the shape the
+    // platform's own `data/users/{self}` is written in.
+    const created = await create({ db: { rules: [{ path: "votes/{self}" }] } });
+    expect(created.status).toBe(200);
+    const id = created.body.id as string;
+    const alice = new Client();
+    const bob = new Client();
+    // Shared paths are still on the defaults, and the first call is what
+    // hands each client its viewer cookie.
+    expect((await alice.call(id, { verb: "set", path: "t/1", body: { a: 1 } })).status).toBe(200);
+    expect((await bob.call(id, { verb: "get", path: "t/1" })).body.exists).toBe(true);
+
+    expect((await alice.call(id, { verb: "set", path: "votes/me", body: { a: 1 } })).status).toBe(
+      200,
+    );
+    expect((await alice.call(id, { verb: "get", path: `votes/${alice.viewerId}` })).body.data)
+      .toEqual({ a: 1 });
+    // ...and each viewer's subtree under it is private.
+    expect((await bob.call(id, { verb: "get", path: `votes/${alice.viewerId}` })).body.exists)
+      .toBe(false);
+  });
+
   it("closes the store when one is already stored, and warns once", async () => {
     // Published before the check existed (or written straight to disk): the
     // view must close, not fall back to the permissive defaults.

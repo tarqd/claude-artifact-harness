@@ -120,11 +120,17 @@ lane too, and the refresh timer stops as soon as nothing is subscribed.
   that check — or written straight to disk — can reach the closed state.
 - "Does not compile" is deliberately wider than a bad rule path. `rules`
   present but not an array (a double-encoded JSON string, an object) is an
-  error, not an absence — only an absent `rules` asks for the defaults — and
-  a rule that sets neither `read` nor `write` is refused rather than
-  compiled to a no-op, since `{path: "", raed: "owner"}` reads to its author
-  as a locked-down root. The compiler bounds and escapes the path it echoes
-  back, because that message reaches a console and an HTTP response.
+  error, not an absence, and so is a config bag that declares no `rules` but
+  carries a key nothing here knows — `{rulez: [...]}` is a declaration with
+  the key misspelled, not a request for the defaults. Only a bare absence
+  (`{}`, `{optional: true}`) asks for the defaults; a bag that does carry
+  `rules` may carry spine keys beside it, since the bag is shared. A rule
+  that sets neither `read` nor `write` is refused rather than compiled to a
+  no-op, since `{path: "", raed: "owner"}` reads to its author as a
+  locked-down root — unless the path ends in `{self}`, which declares
+  privacy rather than a level and is how `data/users/{self}` itself is
+  written. The compiler bounds and escapes the path it echoes back, because
+  that message reaches a console and an HTTP response.
 
 ## Deviations from the platform, and why
 

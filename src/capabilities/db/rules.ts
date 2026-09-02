@@ -14,8 +14,9 @@
  * those defaults: the view closes to `owner`/`owner` (see `closed()`), and
  * the caller reports the errors. `POST /api/artifacts` refuses such a
  * declaration outright, so an author sees the typo at publish. "Does not
- * compile" includes a `rules` that is present but is not a list of rules —
- * only an absent `rules` means "I asked for the defaults".
+ * compile" includes a `rules` that is present but is not a list of rules,
+ * and a config bag whose only keys are ones nothing here knows (`rulez`) —
+ * only a bare absence means "I asked for the defaults".
  *
  * Pure module: no I/O, so the server and the tests share one implementation.
  */
@@ -161,6 +162,13 @@ export function compileRules(config: unknown): CompiledRules {
 }
 
 /**
+ * Config keys this slice and the spine understand. `optional` is valid on
+ * every capability and is read by `buildInitCapabilities`; anything else in
+ * a `db` config bag that declares no `rules` is a misspelling.
+ */
+const CONFIG_KEYS: ReadonlySet<string> = new Set(["rules", "optional"]);
+
+/**
  * The declared rule list, or `null` when nothing was declared.
  *
  * "Absent" and "present but not a list of rules" are NOT the same answer.
@@ -173,9 +181,22 @@ function readRuleList(config: unknown): { rules: unknown[] } | { error: string }
   if (typeof config !== "object" || Array.isArray(config)) {
     return { error: "config must be an object" };
   }
-  if (!("rules" in config)) return null;
   const rules = (config as { rules?: unknown }).rules;
-  if (rules === undefined) return null;
+  if (rules === undefined) {
+    // No `rules` asks for the defaults - unless the bag carries a key
+    // neither this slice nor the spine knows, in which case it is a
+    // declaration with the key misspelled (`rulez`), and running the
+    // permissive defaults under it is the same silent opening as before.
+    // Only the absence is judged: the bag is shared with the spine, so a
+    // config that DOES carry `rules` may carry spine keys beside it.
+    for (const key of Object.keys(config)) {
+      if (CONFIG_KEYS.has(key)) continue;
+      return {
+        error: `unknown db config key ${JSON.stringify(key.slice(0, 80))}; did you mean "rules"?`,
+      };
+    }
+    return null;
+  }
   if (!Array.isArray(rules)) return { error: "rules must be an array of rule objects" };
   return { rules };
 }
@@ -217,7 +238,10 @@ function compileRule(entry: unknown, index: number, errors: string[]): CompiledR
   // A rule that sets neither level is a no-op, and a no-op is never what
   // the author meant: `{path: "", raed: "owner"}` is the same typo class as
   // a bad path, and reads as a locked-down root that never locked anything.
-  if (read === null && write === null) {
+  // A `{self}` rule is the exception, and not a no-op: it declares privacy
+  // rather than a level, exactly as the platform's own `data/users/{self}`
+  // does, and dropping it would hand the owner every viewer's subtree.
+  if (read === null && write === null && !parsed.self) {
     errors.push(`rule ${index}: a rule must set read, write, or both`);
     return null;
   }

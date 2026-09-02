@@ -241,10 +241,56 @@ describe("a rules declaration that is not a list of rules", () => {
   });
 
   it("still treats an absent rules list as the defaults", () => {
-    for (const config of [{}, undefined, null, { rules: undefined }, { other: 1 }]) {
+    for (const config of [{}, undefined, null, { rules: undefined }]) {
       expect(compileRules(config).errors).toEqual([]);
       expect(can(config, "t/1", "write", viewer(A, "interact"))).toBe(true);
     }
+  });
+});
+
+describe("a config bag with the rules key misspelled", () => {
+  // `rulez` is not an absence: the whole declaration is there, and it asks
+  // for the opposite of the defaults. Reading it as "nothing was declared"
+  // put a store the author locked to `owner` one keystroke from anonymously
+  // writable, with no error at publish and nothing visible to the page.
+  const typo = { rulez: [{ path: "", read: "view", write: "owner" }] };
+
+  it("is refused, and closes the view", () => {
+    expect(compileRules(typo).errors).toEqual([
+      'unknown db config key "rulez"; did you mean "rules"?',
+    ]);
+    expect(can(typo, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(typo, "t/1", "write", viewer(null, "interact"))).toBe(false);
+    expect(can(typo, "t/1", "read", viewer(null, "view"))).toBe(false);
+    expect(can(typo, "t/1", "write", viewer(A, "owner"))).toBe(true);
+    for (const key of ["Rules", "rule", "ruIes"]) {
+      expect(compileRules({ [key]: [] }).errors).toHaveLength(1);
+      expect(can({ [key]: [] }, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    }
+  });
+
+  it("leaves a bare absence, and the keys the spine owns, on the defaults", () => {
+    // The config bag is shared with the spine: `optional` is read by
+    // `buildInitCapabilities` and is valid on every capability, and
+    // `{db: true}` / `{db: {}}` both reach this compiler as `{}`.
+    for (const config of [{}, undefined, null, { optional: true }, { rules: undefined }]) {
+      expect(compileRules(config).errors).toEqual([]);
+      expect(can(config, "t/1", "write", viewer(A, "interact"))).toBe(true);
+    }
+    // Only the ABSENCE is judged, so a bag that does declare rules may carry
+    // spine keys beside them without the slice second-guessing the spine.
+    const both = { optional: true, rules: [{ path: "", read: "view", write: "owner" }] };
+    expect(compileRules(both).errors).toEqual([]);
+    expect(can(both, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(both, "t/1", "read", viewer(A, "view"))).toBe(true);
+  });
+
+  it("bounds and escapes the key it echoes back", () => {
+    const nasty = { [`x\ny${"z".repeat(5000)}`]: 1 };
+    const [message] = compileRules(nasty).errors;
+    expect(message).toMatch(/unknown db config key/);
+    expect(message).not.toContain("\n");
+    expect((message as string).length).toBeLessThan(140);
   });
 });
 
@@ -265,6 +311,41 @@ describe("a rule that sets no level", () => {
     expect(can(one, "notes/n1", "read", viewer(A, "view"))).toBe(true);
     expect(can(one, "notes/n1", "write", viewer(A, "interact"))).toBe(false);
     expect(can(one, "notes/n1", "write", viewer(A, "admin"))).toBe(true);
+  });
+});
+
+describe("a {self} rule that sets no level", () => {
+  // The documented way to say "this prefix is private per viewer, levels
+  // unchanged" (db.d.ts: "with no prefix rule, siblings' subtrees stay
+  // private as under `data/users`"), and exactly how the platform writes its
+  // own `data/users/{self}`. The level-less refusal must not catch it: a
+  // `{self}` rule declares privacy, not a level, and it is never a no-op.
+  const cfg = { rules: [{ path: "votes/{self}" }] };
+
+  it("compiles, and leaves every level where it was", () => {
+    expect(compileRules(cfg).errors).toEqual([]);
+    expect(can(cfg, `votes/${A}/x`, "write", viewer(A, "interact"))).toBe(true);
+    expect(can(cfg, `votes/${A}/x`, "read", viewer(A, "view"))).toBe(true);
+    expect(can(cfg, "t/1", "write", viewer(A, "interact"))).toBe(true);
+  });
+
+  it("keeps a sibling's subtree private, from the owner too", () => {
+    expect(can(cfg, `votes/${B}/x`, "read", viewer(A, "owner"))).toBe(false);
+    expect(can(cfg, `votes/${B}/x`, "write", viewer(A, "owner"))).toBe(false);
+    expect(can(cfg, `votes/${B}/x`, "read", viewer(null, "interact"))).toBe(false);
+  });
+
+  it("is carried into the closure when another rule is bad", () => {
+    // Refusing to compile it would drop it from `added`, so the closure
+    // would have no `votes/{self}` to carry and would hand the owner every
+    // viewer's private subtree - the hole the closure exists to shut.
+    const broken = {
+      rules: [{ path: "votes/{self}" }, { path: "bad path!", read: "view" }],
+    };
+    expect(compileRules(broken).errors).toEqual(['rule 1: "bad path!" is not a rule path']);
+    expect(can(broken, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(broken, `votes/${B}/x`, "read", viewer(A, "owner"))).toBe(false);
+    expect(can(broken, `votes/${A}/x`, "read", viewer(A, "owner"))).toBe(true);
   });
 });
 
