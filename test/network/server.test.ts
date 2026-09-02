@@ -128,6 +128,15 @@ describe("validateOrigins", () => {
         TEST_FRAME_SUFFIX,
       ),
     ).toEqual(["https://ok.example"]);
+    // ...and the bare frame host suffix itself, case-insensitively — an
+    // artifact can be served at that host directly, not only at a subdomain.
+    expect(
+      validateOrigins(
+        ["https://ARTIFACTS.example", "https://ok.example"],
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
+    ).toEqual(["https://ok.example"]);
     // An unrelated https origin is kept.
     expect(validateOrigins(["https://unrelated.example"], TEST_SHELL, TEST_FRAME_SUFFIX)).toEqual([
       "https://unrelated.example",
@@ -188,6 +197,18 @@ describe("connectSrcOrigins", () => {
         {
           network: {
             config: { origins: [`https://x.${TEST_FRAME_SUFFIX}`, "https://a.example"] },
+          },
+        },
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
+    ).toEqual(["https://a.example"]);
+    // The bare frame host suffix itself, not only a subdomain of it.
+    expect(
+      connectSrcOrigins(
+        {
+          network: {
+            config: { origins: [`https://${TEST_FRAME_SUFFIX}`, "https://a.example"] },
           },
         },
         TEST_SHELL,

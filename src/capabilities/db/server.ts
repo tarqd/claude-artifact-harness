@@ -65,6 +65,33 @@ interface GrantPayload {
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A genuine `CapError`: the plain-data shape the store and the rules throw
+ * on purpose (errors.ts: "never `Error` instances"). `isCapError` is a duck
+ * type on `{code, message}` alone, and a Node `fs/promises` failure is an
+ * `Error` that *also* has a string `.code` (`ENAMETOOLONG`, `EACCES`, ...) and
+ * a string `.message` — so it satisfies that shape too. Excluding anything
+ * that is an `Error` instance is what actually tells the two apart.
+ */
+function isGenuineCapError(err: unknown): err is CapError {
+  return isCapError(err) && !(err instanceof Error);
+}
+
+/**
+ * Turn a caught value into the `CapError` a caller may see. A genuine
+ * `CapError` the store or the rules threw on purpose (`invalid_argument`,
+ * `quota_exceeded`, ...) passes through verbatim; anything else — a raw
+ * `Error` off a failed `fs/promises` call, say — is logged here, server-side,
+ * and replaced with a fixed, pathless message, since Node's filesystem errors
+ * carry the absolute `DATA_DIR` path (`ENAMETOOLONG: ... open
+ * '/…/artifacts/<id>/db/….tmp'`) and that string must never reach the frame.
+ */
+function safeError(err: unknown, fallbackCode: string): CapError {
+  if (isGenuineCapError(err)) return err;
+  console.error("db capability error:", err);
+  return capError(fallbackCode, "store unavailable");
+}
+
 function statusFor(error: CapError): 400 | 403 | 429 | 503 {
   switch (error.code) {
     case "resource_exhausted":
@@ -271,7 +298,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       if (!body) throw capError("invalid_argument", "bad request body");
       return c.json(await call(view, body));
     } catch (err) {
-      const error = toCapError(err, "unavailable");
+      const error = safeError(err, "unavailable");
       return c.json(error, statusFor(error));
     }
   });
@@ -298,7 +325,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       const grant = ctx.auth.seal(Buffer.from(JSON.stringify(payload), "utf8").toString("base64url"));
       return c.json({ grant, spec, expiresIn: Math.floor(GRANT_TTL_MS / 1000) });
     } catch (err) {
-      const error = toCapError(err, "unavailable");
+      const error = safeError(err, "unavailable");
       return c.json(error, statusFor(error));
     }
   });
@@ -355,7 +382,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       const docs = await evaluate(view, spec);
       send(lane, { kind: "rows", subId, docs });
     } catch (err) {
-      const error = toCapError(err, "unavailable");
+      const error = safeError(err, "unavailable");
       send(lane, { kind: "error", subId, code: error.code, message: error.message });
       if (error.code !== "unavailable") lane.subs.delete(subId);
     }

@@ -213,6 +213,34 @@ describe("POST /api/frame/sample/call", () => {
     await iterator.return(undefined);
   });
 
+  it("refuses a second concurrent call from the same viewer with the same callId", async () => {
+    // Both requests pass the duplicate check before either has anything
+    // parked in `waiters` (which only fills in once a tool round actually
+    // starts): without a reservation made at admission, both would be
+    // admitted and later clobber each other's waiter. Fired together, so the
+    // race is the one the fix closes rather than one this test serialises
+    // away by accident.
+    const callId = nextCallId();
+    const [first, second] = await Promise.all([
+      callSample({ callId, input: "racer one" }),
+      callSample({ callId, input: "racer two" }),
+    ]);
+
+    const responses = [first, second];
+    const winners = responses.filter((r) => r.status === 200);
+    const losers = responses.filter((r) => r.status === 409);
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+
+    const duplicate = (await losers[0]!.json()) as { code: string; message: string };
+    expect(duplicate).toMatchObject({ code: "invalid_request" });
+    expect(duplicate.message).toMatch(/duplicate/);
+
+    const list = await collect(winners[0]!);
+    expect(list[0]).toMatchObject({ type: "start" });
+    expect(list.at(-1)).toEqual({ type: "done", truncated: false });
+  });
+
   it("lets two viewers park the same callId without colliding", async () => {
     // A client-chosen callId is not unique across viewers. Before the fix,
     // the waiters map was keyed by callId alone: once viewer A had a call

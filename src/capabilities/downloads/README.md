@@ -37,10 +37,13 @@ through an object URL. Nothing is uploaded, stored or logged.
 
 **Broker (`broker.ts`)** — the shell decides, in this order:
 
-1. **Filename.** Sanitized to a bare basename (directory separators,
-   control characters, `<>:"|?*`, leading dots and trailing dots/spaces all
-   go), extension lower-cased, final name capped at 200 characters. The
-   viewer confirms that final name, which may differ from the page's.
+1. **Filename.** Sanitized to a bare basename (directory separators go
+   first, then the name is NFC-normalised and Unicode format characters —
+   bidi overrides, zero-width marks, BOM — are stripped, so a name that
+   *renders* as one extension cannot resolve to another, then control
+   characters, `<>:"|?*`, and leading dots and trailing dots/spaces all go),
+   extension lower-cased, final name capped at 200 characters. The viewer
+   confirms that final name, which may differ from the page's.
 2. **Allowlists.** `gif png jpg jpeg webp mp4 webm txt json md` always;
    `docx pptx epub csv ttf html svg pdf` while the second list is switched on.
    Off the lists → `rejected_extension`; on the second list while it is off →

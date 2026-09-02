@@ -102,12 +102,17 @@ export function normalizeOrigin(value: unknown): string | null {
  * `/api/frame/*` (or another artifact's frame) from inside this frame with
  * that cookie attached — the same-site-CSRF half of the Host/Origin finding.
  * Host only, case-insensitively: cookies are not port-scoped, so a same
- * host on a different port is exactly as reachable.
+ * host on a different port is exactly as reachable. The suffix itself is a
+ * live frame host too (an artifact can be served at the bare suffix, not
+ * only at a subdomain of it), so it is checked alongside `.<suffix>`, not
+ * only as a parent of it.
  */
 function isSameSite(host: string, shellHost: string, frameHostSuffix: string): boolean {
   const h = host.toLowerCase();
+  const suffix = frameHostSuffix.toLowerCase();
   if (h === shellHost.toLowerCase()) return true;
-  return h.endsWith(`.${frameHostSuffix.toLowerCase()}`);
+  if (h === suffix) return true;
+  return h.endsWith(`.${suffix}`);
 }
 
 /**

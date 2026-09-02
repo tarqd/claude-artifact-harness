@@ -5,8 +5,36 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import type { DbStore as DbStoreType } from "../../src/capabilities/db/store.ts";
+
+// Fails the next matching fs/promises call once, so a test can force
+// `persist`/`unlink` to reject without touching real filesystem limits -
+// exactly the failure a full disk or a permission error would produce.
+let failNextWrite = false;
+let failNextUnlink = false;
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      if (failNextWrite) {
+        failNextWrite = false;
+        throw new Error("simulated write failure");
+      }
+      return actual.writeFile(...args);
+    },
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      if (failNextUnlink) {
+        failNextUnlink = false;
+        throw new Error("simulated unlink failure");
+      }
+      return actual.rm(...args);
+    },
+  };
+});
+
+const {
   DbStore,
   DEFAULT_TTL_MS,
   MAX_DOC_DEPTH,
@@ -18,11 +46,11 @@ import {
   orderRows,
   validateBody,
   validateQuerySpec,
-} from "../../src/capabilities/db/store.ts";
+} = await import("../../src/capabilities/db/store.ts");
 
 const ARTIFACT = "0123456789abcdef0123456789abcdef";
 let dataDir: string;
-let store: DbStore;
+let store: DbStoreType;
 
 beforeAll(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "db-store-"));
@@ -98,6 +126,30 @@ describe("documents", () => {
     await expect(store.set(ARTIFACT, path, { v: 1 })).rejects.toThrow();
     expect(await store.read(ARTIFACT, path)).toBeNull();
     expect(await store.count(ARTIFACT)).toBe(before);
+  });
+
+  it("leaves the index untouched when an update fails to persist", async () => {
+    await store.set(ARTIFACT, "tasks/update-persist-fail", { title: "before" });
+    failNextWrite = true;
+    await expect(
+      store.update(ARTIFACT, "tasks/update-persist-fail", { title: "after" }),
+    ).rejects.toThrow();
+    // The rewritten file was never written, so the index (and what a reader
+    // sees) must still be the pre-update document, not a half-applied merge.
+    expect((await store.read(ARTIFACT, "tasks/update-persist-fail"))?.data).toEqual({
+      title: "before",
+    });
+  });
+
+  it("leaves the index untouched when a delete fails to unlink", async () => {
+    await store.set(ARTIFACT, "tasks/delete-unlink-fail", { title: "still here" });
+    failNextUnlink = true;
+    await expect(store.delete(ARTIFACT, "tasks/delete-unlink-fail")).rejects.toThrow();
+    // The file on disk was never removed, so the document must still be in
+    // the index and readable, not dropped ahead of the failed unlink.
+    expect((await store.read(ARTIFACT, "tasks/delete-unlink-fail"))?.data).toEqual({
+      title: "still here",
+    });
   });
 });
 
