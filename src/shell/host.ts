@@ -7,6 +7,7 @@
 import { CAP_BUDGETS, CONTRACT_VERSION, isFrameConnect, isFrameNav, isFrameReady, isFrameSize, type FrameInit, type Theme } from "../protocol/messages.ts";
 import { disposeBrokers, dispatch, readCapCall } from "./broker.ts";
 import { createConsent } from "./consent.ts";
+import { browserActivation, createNavGate } from "./nav.ts";
 import type { BrokerContext, ConsentRequest, HostOptions, ShellBoot } from "./types.ts";
 
 const SANDBOX = "allow-scripts allow-same-origin allow-forms";
@@ -33,6 +34,17 @@ export class FrameHost {
     restoreInert: () => {
       const iframe = this.iframe;
       if (iframe) iframe.inert = !this.revealed;
+    },
+  });
+  private readonly navGate = createNavGate({
+    isActivated: () => browserActivation(),
+    // Consent is asked before the dialog's own `inert` lands in some paths,
+    // so both halves of "the frame may not act right now" are checked.
+    isFrameInert: () => this.consent.isOpen || this.iframe?.inert !== false,
+    now: () => Date.now(),
+    open: (url) => {
+      // Everything opens in a new tab, severing the opener as claude.ai does.
+      window.open(url, "_blank", "noopener,noreferrer");
     },
   });
   private readonly onMessage = (ev: MessageEvent): void => this.handleMessage(ev);
@@ -189,16 +201,13 @@ export class FrameHost {
     }
   }
 
+  /**
+   * Relay one `__frame_nav`. The gate — a real gesture, an interactive frame,
+   * a rate limit — is what keeps a page from driving `window.open` on its own
+   * (`nav.ts`). Refusals are silent, as on claude.ai.
+   */
   private handleNav(url: string, _newTab: boolean): void {
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return;
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
-    // Everything opens in a new tab, severing the opener as claude.ai does.
-    window.open(parsed.href, "_blank", "noopener,noreferrer");
+    this.navGate.request(url);
   }
 
   private maybeReveal(): void {

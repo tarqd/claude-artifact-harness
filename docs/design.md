@@ -39,6 +39,7 @@ src/
     host.ts          # iframe mount, sandbox/allow, handshake, reveal, theme, nav
     broker.ts        # __frame_cap dispatcher: routes to capabilities/<name>/broker.ts
     consent.ts       # small consent dialog primitive (inert gating)
+    nav.ts           # __frame_nav gate: activation, inert, rate limit
     index.ts
   server/            # Node backend
     index.ts         # boot: two Hono apps (shell origin, frame origin) + ws upgrade
@@ -122,6 +123,7 @@ Admin API on the shell origin for tooling: `POST /api/artifacts` (create from HT
 - Security posture: `canEdit` is owner or admin only; the admin API requires the owner cookie, `Authorization: Bearer <ARTIFACT_OWNER_TOKEN>`, or `ARTIFACT_OPEN_ADMIN=1`; both servers bind `127.0.0.1` unless `BIND_HOST` is set. A forged, expired, or wrong-artifact `__frame_t` is a 403; no token is an anonymous viewer. The resolved viewer is exposed to slice routes as the Hono variable `frameViewer`.
 - RPC id prefixes are owned by `src/protocol/capabilities.ts` (`CAP_ID_PREFIXES`); `createRpc` derives them from the cap name, and `RpcOptions.onTimeout` lets a slice choose its timeout outcome.
 - One `BrokerContext` per mounted view; brokers may export `dispose`.
+- `__frame_nav` is gated, not relayed: the page can post the message itself, so `src/shell/nav.ts` requires transient user activation on the shell (`navigator.userActivation.isActive`), an iframe that is not `inert` (pre-reveal, or a consent dialog is up), and 300 ms since the last opened tab (`NAV_MIN_INTERVAL_MS`), matching the platform. Refusals are silent. A browser without `navigator.userActivation` therefore opens nothing — the gate fails closed rather than trusting the message.
 
 ## Conformance against the platform's own runtime
 
