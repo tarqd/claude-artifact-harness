@@ -28,6 +28,7 @@ import {
   type DocRow,
   type QuerySpec,
 } from "./store.ts";
+import { DEFAULT_FRAME_BODY_LIMIT, maxBodySize } from "../../server/body-limit.ts";
 
 /** How long a lane grant stays usable. */
 const GRANT_TTL_MS = 10 * 60 * 1000;
@@ -124,6 +125,11 @@ function docId(path: string): string {
 
 export function routes(apps: ServerApps, ctx: ServerContext): void {
   const store = new DbStore(ctx.config.dataDir);
+
+  // A document body is capped at `MAX_DOC_BYTES` well inside this, so a
+  // request past it is malformed or hostile either way — refused before
+  // `c.req.json()` buffers it.
+  apps.shell.use("/api/frame/db/*", maxBodySize(DEFAULT_FRAME_BODY_LIMIT));
 
   /* ------------------------------ identity ----------------------------- */
 

@@ -42,6 +42,14 @@ const EMIT_BURST = 80;
 const MESSAGE_PER_SEC = 120;
 const MESSAGE_BURST = 240;
 
+/**
+ * The most sockets one signed-in viewer may hold open in one room. A viewer
+ * driving the lane directly (devtools, many tabs) would otherwise multiply
+ * both the ingress budget and the fan-out cost without limit; a handful of
+ * tabs on one document is the legitimate case this still allows.
+ */
+const MAX_SOCKETS_PER_VIEWER = 8;
+
 interface Bucket {
   tokens: number;
   at: number;
@@ -258,7 +266,32 @@ export function routes(_apps: ServerApps, ctx: ServerContext): void {
           const level = ctx.auth.levelFor({ id: viewerId, isOwner }, meta);
           const roomConfig = meta.capabilities.room?.config;
           const topics = readTopics(roomConfig);
-          const { maxBytes } = readLimits(roomConfig);
+          const { maxBytes, maxPeers } = readLimits(roomConfig);
+
+          // Cap connections per (artifactId, viewerId) and per room, ahead of
+          // the handshake so a capped viewer never gets a socket to hold
+          // open. A reconnect on an already-held peer id displaces the
+          // incumbent below and never grows either count, so it is exempt.
+          const existingRoom = rooms.get(artifactId);
+          const staleForPeer = existingRoom?.conns.get(peerId);
+          const isReconnect = staleForPeer !== undefined && staleForPeer.viewerId === viewerId;
+          if (!isReconnect) {
+            const roomSize = existingRoom?.conns.size ?? 0;
+            if (roomSize >= maxPeers) {
+              refuse(request, socket, head, "resource_exhausted");
+              return;
+            }
+            let viewerSockets = 0;
+            if (existingRoom) {
+              for (const conn of existingRoom.conns.values()) {
+                if (conn.viewerId === viewerId) viewerSockets++;
+              }
+            }
+            if (viewerSockets >= MAX_SOCKETS_PER_VIEWER) {
+              refuse(request, socket, head, "resource_exhausted");
+              return;
+            }
+          }
 
           wss.handleUpgrade(request, socket, head, (ws) => {
             const room = roomFor(artifactId);

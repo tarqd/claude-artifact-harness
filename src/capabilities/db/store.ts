@@ -40,6 +40,8 @@ export const DEFAULT_TTL_MS = 30_000;
 export const MAX_WHERE = 10;
 export const MAX_IN_VALUES = 30;
 export const MAX_LIMIT = 1000;
+/** A filter's `v`, serialized — it is sealed into the lane grant verbatim. */
+export const MAX_WHERE_VALUE_BYTES = 4096;
 /** Documents one query may scan before it is refused. */
 export const MAX_SCAN = 5000;
 
@@ -232,6 +234,15 @@ function validateWhere(clause: unknown): WhereClause {
     if ((raw.v as unknown[]).length > MAX_IN_VALUES) {
       INVALID(`the ${op} operator takes at most ${MAX_IN_VALUES} values`);
     }
+  }
+  let serializedValue: string | undefined;
+  try {
+    serializedValue = JSON.stringify(raw.v);
+  } catch {
+    INVALID("a filter value must be plain JSON");
+  }
+  if (Buffer.byteLength(serializedValue ?? "") > MAX_WHERE_VALUE_BYTES) {
+    INVALID(`a filter value is larger than ${MAX_WHERE_VALUE_BYTES} bytes`);
   }
   return { f: raw.f as string, op, v: raw.v };
 }

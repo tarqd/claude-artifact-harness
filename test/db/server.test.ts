@@ -151,6 +151,32 @@ describe("the call endpoint", () => {
     }
   });
 
+  it("refuses a body over the cap before it is parsed, and never writes it", async () => {
+    const id = await createArtifact({ db: {} });
+    const viewer = new Client();
+    const oversized = await viewer.call(id, {
+      verb: "set",
+      path: "tasks/big",
+      body: { blob: "x".repeat(600 * 1024) },
+    });
+    expect(oversized.status).toBe(413);
+    expect(oversized.body.code).toBe("too_large");
+    // The handler never ran: nothing was written.
+    const read = await viewer.call(id, { verb: "get", path: "tasks/big" });
+    expect(read.body).toEqual({ id: "big", exists: false });
+  });
+
+  it("refuses a where value over the serialized size bound", async () => {
+    const id = await createArtifact({ db: {} });
+    const viewer = new Client();
+    const result = await viewer.call(id, {
+      verb: "query",
+      spec: { collection: "tasks", where: [{ f: "title", op: "==", v: "x".repeat(5000) }] },
+    });
+    expect(result.status).toBe(400);
+    expect(result.body.code).toBe("invalid_argument");
+  });
+
   it("refuses an artifact that does not declare db", async () => {
     const id = await createArtifact({ artifact: {} });
     const result = await new Client().call(id, { verb: "get", path: "tasks/t1" });

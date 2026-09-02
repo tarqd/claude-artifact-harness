@@ -12,6 +12,7 @@ import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { capError, isCapError, type CapError } from "../../protocol/errors.ts";
 import { isArtifactId } from "../../protocol/paths.ts";
+import { maxBodySize } from "../../server/body-limit.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import {
   MAX_PROMPT_BYTES,
@@ -577,14 +578,18 @@ function readImages(raw: unknown, limits: ImageLimits | null): WireImage[] {
   return out;
 }
 
-/** Read the body, refusing one too big to hold before it is parsed. */
+/**
+ * Read the body, refusing one too big to hold before it is parsed. The
+ * `maxBodySize` middleware mounted on this route already meters the stream
+ * itself — including a chunked body, which declares no `content-length` to
+ * pre-check — so this is a backstop: a multi-byte character makes `raw` (in
+ * UTF-16 units) shorter than its own UTF-8 byte length, so the check must
+ * measure bytes, not string length, or it can pass a body the middleware
+ * would have refused.
+ */
 async function readBody(c: Context): Promise<CallBody> {
-  const declared = Number(c.req.header("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    refuse(413, "too_large", "the request body is too large");
-  }
   const raw = await c.req.text().catch(() => "");
-  if (raw.length > MAX_BODY_BYTES) {
+  if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) {
     refuse(413, "too_large", "the request body is too large");
   }
   let parsed: unknown = null;
@@ -599,6 +604,10 @@ async function readBody(c: Context): Promise<CallBody> {
 }
 
 export function routes(apps: ServerApps, ctx: ServerContext): void {
+  // Meters the stream itself, so a chunked body (no `content-length` to
+  // pre-check) is caught exactly like one that declares its length honestly.
+  apps.shell.use("/api/frame/sample/*", maxBodySize(MAX_BODY_BYTES));
+
   apps.shell.post("/api/frame/sample/call", async (c) => {
     // Everything the page API promises is re-checked here: this route, not
     // the shell page, is what a direct HTTP caller meets.

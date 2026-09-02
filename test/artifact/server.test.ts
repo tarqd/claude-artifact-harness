@@ -325,3 +325,32 @@ describe("publish endpoint (the artifact broker's backend)", () => {
     expect(await response.json()).toMatchObject({ code: "invalid_content" });
   });
 });
+
+describe("admin write routes", () => {
+  it("refuses a create body over the cap before it is parsed", async () => {
+    const response = await fetch(`${server.shellOrigin}/api/artifacts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ html: "x".repeat(18_000_000) }),
+    });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ code: "too_large" });
+  });
+
+  it("refuses a publish body over the cap before it is parsed", async () => {
+    const artifact = await create(server);
+    const response = await fetch(
+      `${server.shellOrigin}/api/artifacts/${artifact.id}/publish`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseVersion: artifact.version, html: "x".repeat(18_000_000) }),
+      },
+    );
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ code: "too_large" });
+    // The handler never ran: the version stayed put.
+    const live = await fetch(`${server.shellOrigin}/api/artifacts/${artifact.id}/version`);
+    expect(await live.json()).toMatchObject({ version: artifact.version });
+  });
+});

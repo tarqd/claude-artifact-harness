@@ -80,7 +80,11 @@ does not declare `room` gets the upgrade and then one `{kind: "revoked", code:
 reconnecting forever. A connection is one peer, named by the id the shell
 minted and **bound to the viewer that presented it**: a second connection with
 the same id is that view reconnecting and displaces the first, but the same id
-from a different viewer is refused. Presence and event payloads are held to
+from a different viewer is refused. A viewer may hold at most 8 sockets open
+in one room, and a room admits at most its declared `maxPeers` sockets
+overall (256 by default); an upgrade past either cap completes only to
+deliver `{kind: "revoked", code: "resource_exhausted"}`, same as
+`not_granted`. Presence and event payloads are held to
 the artifact's own `maxBytes` (4 KiB by default, the same cap the frame
 applies on the way out), frames larger than the largest declarable limit are
 never read, and each connection has a token bucket (120 messages/s burst 240,

@@ -336,6 +336,49 @@ describe("the room lane", () => {
     guest.close();
   });
 
+  it("refuses a viewer's 9th socket in a room, and recovers after a close", async () => {
+    const id = await createArtifact({ room: { config: {} } });
+    const viewer = "u_vvvvvvvvvvvvvvvvvvvvvv";
+    const lanes: Lane[] = [];
+    for (let i = 0; i < 8; i++) {
+      const lane = new Lane(id, viewer);
+      await lane.open();
+      lanes.push(lane);
+    }
+    const ninth = new Lane(id, viewer);
+    await ninth.open();
+    await ninth.until(() => ninth.of("revoked").length === 1, "no terminal event");
+    expect(ninth.of("revoked")[0]).toEqual({ kind: "revoked", code: "resource_exhausted" });
+    await ninth.closed();
+
+    // Closing one of the eight frees a slot for a fresh one.
+    const dying = lanes.pop()!;
+    dying.close();
+    await dying.closed();
+    const recovered = new Lane(id, viewer);
+    await recovered.open();
+    await recovered.until(() => recovered.of("welcome").length === 1, "no welcome");
+
+    for (const lane of lanes) lane.close();
+    recovered.close();
+  });
+
+  it("refuses a distinct viewer once a room holds its declared maxPeers", async () => {
+    const id = await createArtifact({ room: { config: { limits: { maxPeers: 2 } } } });
+    const a = new Lane(id, "u_wwwwwwwwwwwwwwwwwwwwww");
+    const b = new Lane(id, "u_xxxxxxxxxxxxxxxxxxxxxx");
+    await Promise.all([a.open(), b.open()]);
+
+    const c = new Lane(id, "u_yyyyyyyyyyyyyyyyyyyyyy");
+    await c.open();
+    await c.until(() => c.of("revoked").length === 1, "no terminal event");
+    expect(c.of("revoked")[0]).toEqual({ kind: "revoked", code: "resource_exhausted" });
+    await c.closed();
+
+    a.close();
+    b.close();
+  });
+
   it("keeps two artifacts' rooms apart", async () => {
     const one = await createArtifact({ room: { config: { topics: { reaction: "interact" } } } });
     const two = await createArtifact({ room: { config: { topics: { reaction: "interact" } } } });
