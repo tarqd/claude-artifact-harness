@@ -252,22 +252,46 @@ function artifactIdFrom(host: string | undefined, header: string | undefined): s
   return header && isArtifactId(header) ? header : null;
 }
 
+/**
+ * Validates a `next=` redirect target against the shell origin and returns
+ * the exact URL to send the browser to, or `null` if it doesn't resolve to
+ * a same-origin destination.
+ *
+ * Resolved against a *normalized* shell origin — `new URL(shellOrigin).origin`,
+ * not the raw `http://host:port` string — because `shellOrigin` is a plain
+ * template (`shellOrigin()` in `config.ts`) that is not port-normalized the
+ * way `URL#origin` is: with the default HTTP port, `"http://host:80"` and
+ * `new URL("/x", "http://host:80").origin` (`"http://host"`) are different
+ * strings, so a textual `===` against the un-normalized value would reject
+ * every `next=`, including legitimate same-origin ones.
+ *
+ * Returns the *parsed* `target.href`, not the raw `next` string it was
+ * validated from: `new URL()` silently strips ASCII tab/CR/LF while parsing,
+ * so a same-origin-looking `next` smuggling CRLF would otherwise reach
+ * `Headers.set` verbatim, which throws on control characters (crashing the
+ * request). Reassembling from `target.pathname` instead of using `href`
+ * whole would have the same bug in the other direction: `new URL("/..//evil.com",
+ * shellOrigin).pathname` is `//evil.com`, itself protocol-relative.
+ */
+export function resolveNextRedirect(next: string, shellOrigin: string): string | null {
+  let target: URL;
+  try {
+    target = new URL(next, shellOrigin);
+  } catch {
+    return null;
+  }
+  const normalizedShellOrigin = new URL(shellOrigin).origin;
+  return target.origin === normalizedShellOrigin ? target.href : null;
+}
+
 export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
   app.get("/login", (c) => {
     const ok = ctx.auth.login(c, c.req.query("token") ?? "");
     if (!ok) return c.text("invalid owner token", 403);
     const next = c.req.query("next");
     if (next) {
-      // Resolved against the shell origin so protocol-relative (`//evil.com`)
-      // and backslash (`/\evil.com`, which browsers treat as `//evil.com`)
-      // forms land off-origin and are rejected, not just checked textually.
-      let target: URL | null = null;
-      try {
-        target = new URL(next, ctx.shellOrigin);
-      } catch {
-        target = null;
-      }
-      if (target && target.origin === ctx.shellOrigin) return c.redirect(next);
+      const target = resolveNextRedirect(next, ctx.shellOrigin);
+      if (target) return c.redirect(target);
     }
     return c.text("logged in as the owner");
   });
