@@ -181,9 +181,13 @@ a dead transport does, and a lapsed credential forgets the tool listing so
   configured server answers 401/403.
 - **No user-activation check on consent.** The platform posts `callTool`
   with `includeUserActivation` so the shell can insist on a gesture; the
-  `RpcHost` seam carries no such option, and `src/shell/consent.ts` makes
-  the iframe inert instead. A page can therefore ask on load; the answer is
-  still the viewer's.
+  `RpcHost` seam carries no such option, and a page may legitimately call a
+  tool on load, so refusing there would break the surface rather than protect
+  it. What protects the viewer is the dialog itself — the iframe is inert
+  while it is up, focus is on the dialog rather than a button, and "Allow"
+  ignores activation for its first 500 ms (`CONSENT_SETTLE_MS` in
+  `src/shell/consent.ts`), so a tool call timed under a keypress decides
+  nothing. A page can still ask on load; the answer is the viewer's.
 - **`host:` servers are always `server_not_connected`**, `listTools` omits
   them, and `permissions.state("mcp:host:<name>")` reads `unavailable`
   rather than `prompt`: a service never runs a device server, this shell

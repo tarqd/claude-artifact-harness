@@ -62,9 +62,12 @@ imports the other.
 **Shell** (`broker.ts`):
 
 - First-call consent per artifact per viewer. `__frame_cap_ack` goes out
-  first, the iframe is `inert` while the dialog is up, and the answer is
-  persisted in the shell's `localStorage` under `consent:<artifactId>:sample`
-  as `granted`/`denied` — the key the `permissions` slice reads. A decline is
+  first, the iframe is `inert` while the dialog is up — which focuses no
+  button and ignores "Allow" for its first 500 ms, so a call timed under a
+  keypress the viewer meant for the page cannot answer for them — and the
+  answer is persisted in the shell's `localStorage` under
+  `consent:<artifactId>:sample` as `granted`/`denied`, the key the
+  `permissions` slice reads. A decline is
   `not_granted` and is never re-asked. Calls that arrive while the dialog is
   open all wait on that one dialog.
 - A 5-minute reply cache keyed by `(input, modelTier, image bytes, verb)`

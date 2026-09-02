@@ -38,7 +38,7 @@ src/
   shell/             # runs in the parent page (host)
     host.ts          # iframe mount, sandbox/allow, handshake, reveal, theme, nav
     broker.ts        # __frame_cap dispatcher: routes to capabilities/<name>/broker.ts
-    consent.ts       # small consent dialog primitive (inert gating)
+    consent.ts       # small consent dialog primitive (inert gating, input-settle delay)
     index.ts
   server/            # Node backend
     index.ts         # boot: two Hono apps (shell origin, frame origin) + ws upgrade
@@ -210,6 +210,19 @@ shape of the design above:
 - **Consent is per browser, not per account.** `consent:<artifactId>:<cap>`
   in the shell origin's `localStorage`, shared verbatim by `sample` and
   `permissions`, so one decision governs both.
+- **The consent dialog is timing-hardened.** The page picks the moment a
+  dialog appears, so `src/shell/consent.ts` opens with focus on the dialog
+  itself rather than a button and refuses to activate "Allow" for the first
+  500 ms (`CONSENT_SETTLE_MS`); refusing — the cancel button, Escape — is
+  never delayed. Without that, a page could call `permissions.request()`
+  while the viewer holds Space and turn the next keypress into a sticky
+  grant. The settle delay is the whole control, and it is deliberately in the
+  shared dialog rather than in one slice: `sample.call` and `mcp.callTool`
+  open the same dialog against the same `consent:<artifactId>:<cap>` key, so
+  a gesture check on `permissions.request()` alone would move the attack
+  rather than close it — and would refuse the platform's own `permissions`
+  module, which posts `request` without `includeUserActivation`
+  (surface-area.md §4).
 - **The `db` lane carries rows, not ops**; the broker diffs them, so the
   realtime path and the refresh fallback cannot drift. A page's own write is
   applied to its subscription mirrors before the round trip (the contract's
