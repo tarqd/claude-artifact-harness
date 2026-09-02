@@ -325,6 +325,21 @@ describe("publish endpoint (the artifact broker's backend)", () => {
     expect(await response.json()).toMatchObject({ code: "invalid_content" });
   });
 
+  it("refuses a self-publish body over PUBLISH_BODY_LIMIT before it is parsed", async () => {
+    const artifact = await create(server);
+    const response = await fetch(`${server.shellOrigin}/api/frame/self/${artifact.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // Above PUBLISH_BODY_LIMIT (32 MiB).
+      body: JSON.stringify({ baseVersion: artifact.version, html: "x".repeat(34_000_000) }),
+    });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ code: "too_large" });
+    // The handler never ran: the version stayed put.
+    const live = await fetch(`${server.shellOrigin}/api/artifacts/${artifact.id}/version`);
+    expect(await live.json()).toMatchObject({ version: artifact.version });
+  });
+
   it("accepts a files publish just under the store's 16 MiB version cap", async () => {
     // Base64 alone inflates decoded bytes by 4/3, so a payload sitting right
     // under MAX_VERSION_BYTES needs well over 16 MiB on the wire. This is
@@ -355,9 +370,9 @@ describe("admin write routes", () => {
     const response = await fetch(`${server.shellOrigin}/api/artifacts`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      // Above ADMIN_PUBLISH_BODY_LIMIT (20 MiB): the admin routes carry no
+      // Above ADMIN_PUBLISH_BODY_LIMIT (32 MiB): the admin routes carry no
       // `files`, so they don't need base64 headroom like self-publish does.
-      body: JSON.stringify({ html: "x".repeat(22_000_000) }),
+      body: JSON.stringify({ html: "x".repeat(34_000_000) }),
     });
     expect(response.status).toBe(413);
     expect(await response.json()).toMatchObject({ code: "too_large" });
@@ -370,8 +385,8 @@ describe("admin write routes", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // Above ADMIN_PUBLISH_BODY_LIMIT (20 MiB).
-        body: JSON.stringify({ baseVersion: artifact.version, html: "x".repeat(22_000_000) }),
+        // Above ADMIN_PUBLISH_BODY_LIMIT (32 MiB).
+        body: JSON.stringify({ baseVersion: artifact.version, html: "x".repeat(34_000_000) }),
       },
     );
     expect(response.status).toBe(413);

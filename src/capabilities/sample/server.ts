@@ -579,16 +579,10 @@ function readImages(raw: unknown, limits: ImageLimits | null): WireImage[] {
 }
 
 /**
- * Read the body, refusing one too big to hold before it is parsed. The
- * `maxBodySize` middleware mounted on this route already meters the stream
- * itself — including a chunked body, which declares no `content-length` to
- * pre-check — so by the time `raw` gets here it has already passed that
- * byte-accurate check on both branches (declared-length or streamed) and
- * this can never actually trip. It stays as defense in depth, measuring
- * bytes rather than `raw.length` (UTF-16 code units, which undercounts a
- * multi-byte-heavy body): if the middleware were ever removed from this
- * route, or a future caller reused `readBody` unguarded, `raw.length` would
- * silently let a body through that is over the cap in real UTF-8 bytes.
+ * Read the body, refusing one too big to hold before it is parsed. Defense
+ * in depth alongside the `maxBodySize` middleware: measures real UTF-8
+ * bytes, not `raw.length` (UTF-16 code units), so a multi-byte-heavy body
+ * is caught here too if that middleware is ever removed or bypassed.
  */
 async function readBody(c: Context): Promise<CallBody> {
   const raw = await c.req.text().catch(() => "");
