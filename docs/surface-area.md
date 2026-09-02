@@ -521,7 +521,7 @@ From the Artifact tool description and the served HTML:
 - The documented `[hidden]{display:none!important}` reset rule is not present in the envelope served for the artifact inspected (published 2026-08-21); the envelope evidently evolves, so the layer should treat the reset as the documented four rules and not depend on either exact form.
 - Size cap: 16 MB rendered page including data URIs.
 - Storage: `localStorage`, `sessionStorage`, IndexedDB work, per artifact origin (each artifact has its own `<uuid>.frame.claudeusercontent.com` origin).
-- Navigation: cross-origin links are intercepted and forwarded to the shell (`__frame_nav`), which opens them; `<a download>` is blocked (`__frame_blocked`).
+- Navigation: cross-origin links are intercepted and forwarded to the shell (`__frame_nav`), which opens them in a new tab — but only for a click the browser attributes to the viewer (`navigator.userActivation.isActive`), only into a frame that is not `inert`, and no more than one every 300 ms; the message alone proves nothing. `<a download>` is blocked (`__frame_blocked`).
 - Links back: `/_blob/<id>` (assets), `/_dep/<n>/` (embed pins), `/_runtime/<file>` (runtime), `/_f/<token>/` (frame path).
 
 ### 10.1 Content Security Policy
@@ -616,7 +616,8 @@ The minimum a self-hosted shell must do, in order: give each artifact its
 own origin and serve `/_runtime/*.js` beside it; put the shell origin in
 `__FRAME_PREAMBLE.origins`; answer `__frame_connect` with `__frame_init`;
 reveal on `__frame_ready` plus `load` and post `__frame_size_poke`; forward
-`__frame_theme`; relay `__frame_nav`; answer every `__frame_cap` with a
+`__frame_theme`; relay `__frame_nav` behind the platform's gates (user
+activation, un-inert frame, 300 ms interval); answer every `__frame_cap` with a
 `__frame_cap_r` (sending `__frame_cap_ack` when a call will wait on the
 user); and implement the per-capability push channels (`__frame_db_ev`,
 `__frame_room_ev`, `__frame_mcp_watch`, `__frame_cap_p`). Unimplemented

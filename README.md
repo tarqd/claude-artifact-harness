@@ -183,10 +183,10 @@ the documented CSP with `frame-ancestors` pinned to the shell origin and
 ```
 src/protocol/     wire types, validators, error factory, capability roster, path grammar
 src/frame/        the injected preamble (use/handshake/theme/nav/size/RTC) and the RPC client
-src/shell/        iframe host, capability broker + registry, consent dialog
+src/shell/        iframe host, capability broker + registry, consent dialog, nav gate
 src/server/       two Hono apps, filesystem store, auth, page envelope, admin API
 src/capabilities/<name>/{frame,broker,server}.ts (+ pure helpers) + README.md
-test/<name>/      vitest unit tests per slice
+test/<name>/      vitest unit tests per slice (test/shell/ covers the spine's host)
 e2e/              Playwright specs
 fixtures/         artifact pages exercising each capability
 ```
