@@ -159,7 +159,10 @@ The login form itself is `POST /login`, accepted only from the shell origin
 and given a small per-address budget for *wrong* tokens — a correct one is
 never throttled, since behind a terminator every request arrives from the
 proxy's address and a budget that counted successes would be a remote
-lockout of the operator rather than a brake on guessing.
+lockout of the operator rather than a brake on guessing. The admin API's
+`Authorization: Bearer <ARTIFACT_OWNER_TOKEN>` is the same credential and
+gets its own budget on the same terms (a spent one answers `429`), so the
+bearer guard is not an unthrottled oracle for the token the form throttles.
 
 ## Environment variables
 
@@ -204,7 +207,7 @@ Shell origin:
 | `GET /_shell/shell.js` | the shell bundle |
 | `GET /login` | the owner login form (never carries the token; a `?token=` is refused) |
 | `POST /login` | owner login: `token` as a form field or JSON, same-origin, throttled per address |
-| `POST /api/artifacts` | create from HTML + capabilities |
+| `POST /api/artifacts` | create from HTML + capabilities (owner cookie or bearer token; wrong bearers are throttled per address) |
 | `GET /api/artifacts/:id` | metadata and file list |
 | `GET /api/artifacts/:id/version` | the live version (drives live reload) |
 | `POST /api/artifacts/:id/publish` | owner publish (compare-and-set) |

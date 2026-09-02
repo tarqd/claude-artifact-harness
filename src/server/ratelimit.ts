@@ -9,6 +9,13 @@ import type { Context } from "hono";
 /** Default window for every budget built on this. */
 export const RATE_WINDOW_MS = 60_000;
 
+/**
+ * Wrong owner tokens one address may present in a window. The login form and
+ * the admin API's bearer guard are two doors onto the same single master
+ * credential, so they get the same budget (each keeps its own counter).
+ */
+export const CREDENTIAL_ATTEMPTS_PER_WINDOW = 20;
+
 export class RateLimiter {
   private readonly hits = new Map<string, { count: number; resetAt: number }>();
 

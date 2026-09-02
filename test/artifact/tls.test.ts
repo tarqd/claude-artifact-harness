@@ -3,7 +3,8 @@
  * origins carry the configured scheme, the cookies are `Secure` and
  * `__Host-` prefixed when they do, the owner token is posted rather than
  * put in a URL, the owner cookie dies with the token it was minted under,
- * and login is throttled per address.
+ * and both doors onto that token — the login form and the admin API's bearer
+ * header — are throttled per address.
  */
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { request } from "node:http";
@@ -455,6 +456,99 @@ describe("login", () => {
       expect(again.status).toBe(429);
     } finally {
       await throttled.close();
+    }
+  });
+});
+
+describe("the admin API's bearer guard", () => {
+  /** `POST /api/artifacts` with whatever credential headers are given. */
+  const create = (origin: string, headers: Record<string, string>) =>
+    fetch(`${origin}/api/artifacts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ html: fixture, capabilities: {} }),
+    });
+
+  it("throttles guessing from one address, and never the right credential", async () => {
+    const throttled = await startServer({
+      shellPort: 0,
+      framePort: 0,
+      dataDir,
+      ownerToken: OWNER_TOKEN,
+    });
+    try {
+      // The bearer header is the door a script would knock on, so it must not
+      // be a free yes/no oracle for the owner token the login form throttles.
+      let sawLimit = false;
+      for (let i = 0; i < 25; i++) {
+        const response = await create(throttled.shellOrigin, {
+          authorization: `Bearer guess-${i}`,
+        });
+        if (response.status === 429) {
+          sawLimit = true;
+          break;
+        }
+        expect(response.status).toBe(403);
+      }
+      expect(sawLimit).toBe(true);
+
+      // Only wrong answers spend the budget: the publish script and CI share
+      // the terminator's address with every guesser, so a right token that
+      // could be throttled would be a remote lockout of the operator.
+      const right = await create(throttled.shellOrigin, {
+        authorization: `Bearer ${OWNER_TOKEN}`,
+      });
+      expect(right.status).toBe(200);
+
+      // The owner cookie is the other legitimate credential, and is untouched.
+      const login = await fetch(`${throttled.shellOrigin}/login`, form({ token: OWNER_TOKEN }));
+      expect(login.status).toBe(200);
+      const cookie = cookieHeader(login);
+      expect(await create(throttled.shellOrigin, { cookie }).then((r) => r.status)).toBe(200);
+
+      // And guessing is still shut immediately after both of those.
+      const again = await create(throttled.shellOrigin, { authorization: "Bearer guess-again" });
+      expect(again.status).toBe(429);
+    } finally {
+      await throttled.close();
+    }
+  });
+
+  it("spends nothing on a caller that presents no credential", async () => {
+    const quiet = await startServer({
+      shellPort: 0,
+      framePort: 0,
+      dataDir,
+      ownerToken: OWNER_TOKEN,
+    });
+    try {
+      // An anonymous request is not a guess at anything, so it is refused
+      // 403 for as long as it likes and never eats the operator's budget.
+      for (let i = 0; i < 25; i++) {
+        expect(await create(quiet.shellOrigin, {}).then((r) => r.status)).toBe(403);
+      }
+      const right = await create(quiet.shellOrigin, { authorization: `Bearer ${OWNER_TOKEN}` });
+      expect(right.status).toBe(200);
+    } finally {
+      await quiet.close();
+    }
+  });
+
+  it("still serves an explicitly opened admin API, wrong header and all", async () => {
+    const open = await startServer({
+      shellPort: 0,
+      framePort: 0,
+      dataDir,
+      ownerToken: OWNER_TOKEN,
+      openAdminApi: true,
+    });
+    try {
+      for (let i = 0; i < 25; i++) {
+        const response = await create(open.shellOrigin, { authorization: `Bearer junk-${i}` });
+        expect(response.status).toBe(200);
+      }
+    } finally {
+      await open.close();
     }
   });
 });

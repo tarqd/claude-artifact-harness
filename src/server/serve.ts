@@ -15,7 +15,7 @@ import type { ShellBoot } from "../shell/types.ts";
 import { mountAdminApi } from "./admin.ts";
 import { buildShellBoot } from "./boot.ts";
 import { usesTls } from "./config.ts";
-import { clientKey, RateLimiter } from "./ratelimit.ts";
+import { clientKey, CREDENTIAL_ATTEMPTS_PER_WINDOW, RateLimiter } from "./ratelimit.ts";
 import type { FrameApp, ServerContext } from "./types.ts";
 
 /** The documented reset the platform prepends to author content. */
@@ -254,9 +254,6 @@ function artifactIdFrom(host: string | undefined, header: string | undefined): s
   return header && isArtifactId(header) ? header : null;
 }
 
-/** Wrong owner tokens one address may post in a minute. */
-export const LOGIN_ATTEMPTS_PER_WINDOW = 20;
-
 /** Largest login body. The form has two short fields. */
 const MAX_LOGIN_BODY_BYTES = 4096;
 
@@ -429,7 +426,7 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
   // TLS terminator (where every request carries the proxy's address, so the
   // whole internet shares one bucket) is the only outcome a global counter
   // would have.
-  const loginLimit = new RateLimiter(LOGIN_ATTEMPTS_PER_WINDOW);
+  const loginLimit = new RateLimiter(CREDENTIAL_ATTEMPTS_PER_WINDOW);
 
   // HSTS belongs on every response this origin makes, not just the ones that
   // set cookies: `/` is the bare-host URL an operator hands out, so it is the

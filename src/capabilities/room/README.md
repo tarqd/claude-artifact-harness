@@ -74,7 +74,8 @@ rather than vanishing. `dispose` closes the lane when the view is remounted.
 
 **Server** — a `Map<artifactId, Room>` of live connections and nothing else.
 An upgrade is refused unread unless it arrives on the shell listener, carries
-`Origin: <shell origin>` and a valid `av` cookie; an artifact that is gone or
+`Origin: <shell origin>` and a valid viewer cookie (`av`, `__Host-av` on
+https — read through `Auth`, never by name); an artifact that is gone or
 does not declare `room` gets the upgrade and then one `{kind: "revoked", code:
 "not_granted"}`, so the frame's terminal path fires instead of the broker
 reconnecting forever. A connection is one peer, named by the id the shell

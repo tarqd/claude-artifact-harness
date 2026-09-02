@@ -30,6 +30,9 @@ export interface Viewer {
   isOwner: boolean;
 }
 
+/** What the admin guard decided: serve, refuse, or refuse and slow down. */
+export type AdminDecision = "allow" | "deny" | "throttled";
+
 export interface AssetTokenClaims {
   viewerId: string;
   artifactId: string;
@@ -186,16 +189,29 @@ export class Auth {
     return { viewerId, artifactId, expiresAt };
   }
 
-  /** Admin API guard: the owner cookie, or the owner token as a bearer. */
-  isAdminRequest(c: Context): boolean {
+  /**
+   * Admin API guard: the owner cookie, or the owner token as a bearer.
+   *
+   * `spendGuess` is the caller's budget for *wrong* bearer tokens, and is
+   * consulted only on that branch — the same shape the login form takes.
+   * Without it this door would be an unthrottled yes/no oracle for the one
+   * master credential, reachable by anyone who can reach the server; with it
+   * a correct token (the publish script, CI, the operator's browser — all of
+   * which share the terminator's address) is never spent against.
+   */
+  isAdminRequest(c: Context, spendGuess?: (c: Context) => boolean): AdminDecision {
     const viewer = this.viewer(c);
-    if (viewer.isOwner) return true;
+    if (viewer.isOwner) return "allow";
     const expected = this.config.ownerToken;
     const header = c.req.header("authorization") ?? "";
-    if (expected && secretEquals(header, `Bearer ${expected}`)) return true;
+    if (expected && secretEquals(header, `Bearer ${expected}`)) return "allow";
     // Without a credential the admin API is open only when explicitly opened
     // (`ARTIFACT_OPEN_ADMIN=1`): it creates and publishes artifacts.
-    return this.config.openAdminApi;
+    if (this.config.openAdminApi) return "allow";
+    // A wrong `Authorization` is a guess at the owner token; no header at all
+    // is an ordinary anonymous caller and costs nothing.
+    if (header !== "" && spendGuess && !spendGuess(c)) return "throttled";
+    return "deny";
   }
 }
 

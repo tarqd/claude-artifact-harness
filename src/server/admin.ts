@@ -9,6 +9,7 @@
 import type { Context, Hono } from "hono";
 import { isCapError, toCapError } from "../protocol/errors.ts";
 import { isArtifactId } from "../protocol/paths.ts";
+import { clientKey, CREDENTIAL_ATTEMPTS_PER_WINDOW, RateLimiter } from "./ratelimit.ts";
 import type { ServerContext } from "./types.ts";
 
 interface CreateBody {
@@ -33,10 +34,28 @@ function readCapabilities(value: unknown): Record<string, { config?: unknown }> 
 }
 
 export function mountAdminApi(app: Hono, ctx: ServerContext): void {
-  const guard = (c: Context): boolean => ctx.auth.isAdminRequest(c);
+  // The bearer header is the second door onto the owner token, and the one a
+  // script would actually knock on: without a budget it answers "wrong" as
+  // fast as it is asked, which is a guessing oracle for the master credential
+  // on any server reachable beyond loopback. Only a *wrong* token spends it,
+  // exactly as at `POST /login`, so the publish script and CI — sharing the
+  // terminator's address with everyone else — are never locked out.
+  const bearerLimit = new RateLimiter(CREDENTIAL_ATTEMPTS_PER_WINDOW);
+  const spendGuess = (c: Context): boolean => bearerLimit.allow(clientKey(c));
+
+  /** `null` when the caller may proceed, else the refusal to return. */
+  const refuse = (c: Context): Response | null => {
+    const decision = ctx.auth.isAdminRequest(c, spendGuess);
+    if (decision === "allow") return null;
+    if (decision === "throttled") {
+      return c.json({ code: "not_writer", message: "too many attempts" }, 429);
+    }
+    return c.json({ code: "not_writer", message: "owner only" }, 403);
+  };
 
   app.post("/api/artifacts", async (c) => {
-    if (!guard(c)) return c.json({ code: "not_writer", message: "owner only" }, 403);
+    const denied = refuse(c);
+    if (denied) return denied;
     const body = (await c.req.json().catch(() => ({}))) as CreateBody;
     if (typeof body.html !== "string") {
       return c.json({ code: "invalid_content", message: "html is required" }, 400);
@@ -65,7 +84,8 @@ export function mountAdminApi(app: Hono, ctx: ServerContext): void {
   app.get("/api/artifacts/:id", async (c) => {
     // The record carries the capability declaration, the owner's viewer id
     // and the file list: tooling reads it, a viewer never needs it.
-    if (!guard(c)) return c.json({ code: "not_writer", message: "owner only" }, 403);
+    const denied = refuse(c);
+    if (denied) return denied;
     const id = c.req.param("id");
     if (!isArtifactId(id)) return c.json({ code: "invalid_content", message: "bad id" }, 400);
     const meta = await ctx.store.readMeta(id);
@@ -84,7 +104,8 @@ export function mountAdminApi(app: Hono, ctx: ServerContext): void {
   });
 
   app.post("/api/artifacts/:id/publish", async (c) => {
-    if (!guard(c)) return c.json({ code: "not_writer", message: "owner only" }, 403);
+    const denied = refuse(c);
+    if (denied) return denied;
     const id = c.req.param("id");
     if (!isArtifactId(id)) return c.json({ code: "invalid_content", message: "bad id" }, 400);
     const meta = await ctx.store.readMeta(id);
