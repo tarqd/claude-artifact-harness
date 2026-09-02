@@ -7,6 +7,7 @@
  * the contract tells pages to treat as "hide the write affordance".
  */
 import { capError } from "../../protocol/errors.ts";
+import { isMediaType } from "../../protocol/paths.ts";
 import { createRpc } from "../../frame/rpc.ts";
 import type { FrameContext } from "../../frame/types.ts";
 
@@ -112,7 +113,10 @@ export function validateFiles(
       throw capError("invalid_content", `${path}: content must be a string or a Blob`);
     }
     if (contentType !== undefined) {
-      if (typeof contentType !== "string" || contentType.length === 0 || contentType.includes(";")) {
+      // Mirrors the server's grammar (`isMediaType`, in protocol/paths.ts) so
+      // a type the endpoint would reject fails synchronously here too,
+      // instead of round-tripping to the server for the same `invalid_content`.
+      if (typeof contentType !== "string" || !isMediaType(contentType.trim().toLowerCase())) {
         throw capError(
           "invalid_content",
           `${path}: contentType must be a bare media type such as text/plain, with no parameters`,

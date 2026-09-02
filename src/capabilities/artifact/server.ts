@@ -3,7 +3,7 @@
  * calls, mirroring claude.ai's `/api/frame/self/<uuid>`.
  */
 import { toCapError } from "../../protocol/errors.ts";
-import { isArtifactId } from "../../protocol/paths.ts";
+import { isArtifactId, isMediaType } from "../../protocol/paths.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import type { PublishInput } from "../../server/store.ts";
 
@@ -14,19 +14,18 @@ interface EncodedFile {
 }
 
 /**
- * A bare media type, no parameters: mirrors the frame-side check in
- * `capabilities/artifact/frame.ts` (`validateFiles`) so both agree on what a
- * writer may claim, but enforced here too since the frame validator is only
- * a courtesy to well-behaved pages, not a security boundary. Also rules out
- * anything `Headers.set` would reject (CR/LF, non-ASCII) before it can ever
- * reach a response header at serve time.
+ * `isMediaType` (bare media type, no parameters) mirrors the frame-side check
+ * in `capabilities/artifact/frame.ts` (`validateFiles`) so both agree on what
+ * a writer may claim, but is enforced here too since the frame validator is
+ * only a courtesy to well-behaved pages, not a security boundary. It also
+ * rules out anything `Headers.set` would reject (CR/LF, non-ASCII) before it
+ * can ever reach a response header at serve time — and, since `Store` trusts
+ * this normalised value into the `.type` sidecar, `readVersionFile` applies
+ * the same check again on the way back out (store.ts).
  */
-const MEDIA_TYPE_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
-const MAX_CONTENT_TYPE_LENGTH = 128;
-
 function normaliseContentType(path: string, raw: string): string {
   const contentType = raw.trim().toLowerCase();
-  if (contentType.length > MAX_CONTENT_TYPE_LENGTH || !MEDIA_TYPE_RE.test(contentType)) {
+  if (!isMediaType(contentType)) {
     throw toCapError({
       code: "invalid_content",
       message: `${path}: contentType must be a bare media type such as text/plain, with no parameters`,

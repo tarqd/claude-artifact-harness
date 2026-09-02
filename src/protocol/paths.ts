@@ -135,3 +135,23 @@ export const BLOB_ID_RE = /^[0-9a-f]{32}$/;
 export function isBlobId(v: unknown): v is string {
   return typeof v === "string" && BLOB_ID_RE.test(v);
 }
+
+/* ------------------------------------------------------------------ */
+/* media types (publish(files) contentType, and its `.type` sidecar)   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A bare media type, no parameters: `token "/" token` (RFC 6838), lowercase.
+ * Shared by the frame-side validator (`capabilities/artifact/frame.ts`), the
+ * server-side one (`capabilities/artifact/server.ts`) and the store's sidecar
+ * read (`server/store.ts`) so all three agree on what a writer may claim —
+ * and, since the value ends up in a response header, on what `Headers.set`
+ * will accept (no CR/LF, no non-ASCII, no parameters).
+ */
+export const MEDIA_TYPE_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
+export const MAX_MEDIA_TYPE_LENGTH = 128;
+
+/** Expects an already-trimmed, lowercased candidate. */
+export function isMediaType(v: unknown): v is string {
+  return typeof v === "string" && v.length <= MAX_MEDIA_TYPE_LENGTH && MEDIA_TYPE_RE.test(v);
+}

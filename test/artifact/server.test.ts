@@ -4,7 +4,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { request } from "node:http";
+import { request, type IncomingHttpHeaders } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startServer, type RunningServer } from "../../src/server/index.ts";
 
@@ -32,12 +32,14 @@ function rawGet(
   port: number,
   path: string,
   headers: Record<string, string>,
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; body: string; headers: IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = request({ host: "127.0.0.1", port, path, method: "GET", headers }, (res) => {
       let body = "";
       res.on("data", (chunk) => (body += chunk));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+      res.on("end", () =>
+        resolve({ status: res.statusCode ?? 0, body, headers: res.headers }),
+      );
     });
     req.on("error", reject);
     req.end();
@@ -270,13 +272,19 @@ describe("frame origin", () => {
 
   it("preserves the query string on the /_f/<ver> -> /_f/<ver>/ redirect", async () => {
     const artifact = await create(server);
+    // The host-label form, not the `/_a/<id>` prefix: the prefix form is
+    // rewritten to a bare path before this handler ever sees it (server's
+    // `frameFetch`), so a Location built from `c.req.path` there necessarily
+    // drops the `/_a/<id>` prefix — a separate, pre-existing gap this fix
+    // doesn't reach. On the host-label form there is no prefix to lose, so
+    // the redirect is exactly the case #29 asks for: same path, `+/`, query
+    // string intact.
+    const host = { host: `${artifact.id}.localhost:${server.framePort}` };
     // Not a real `__frame_t` (that goes through the asset-token check first,
     // before this handler even runs) — any query string must survive.
-    const response = await fetch(frameUrl(server, artifact.id, "/_f/v1?foo=bar"), {
-      redirect: "manual",
-    });
+    const response = await rawGet(server.framePort, "/_f/v1?foo=bar", host);
     expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe("/_f/v1/?foo=bar");
+    expect(response.headers.location).toBe("/_f/v1/?foo=bar");
   });
 
   it("envelopes TEXT/HTML and application/xhtml+xml but sandboxes everything else", async () => {
@@ -307,8 +315,14 @@ describe("frame origin", () => {
     const svg = await fetch(frameUrl(server, artifact.id, `/_f/${version}/a.svg`));
     expect(svg.status).toBe(200);
     // No preamble runs for a non-document type, so it gets an unconditional
-    // sandbox instead of the frame's normal (script-permitting) CSP.
-    expect(svg.headers.get("content-security-policy")).toBe("sandbox");
+    // `sandbox` — but layered on top of the frame's normal CSP, not in place
+    // of it: `frame-ancestors` (and `default-src 'none'` etc.) must survive,
+    // or any origin could frame the file and any directly-navigated document
+    // type could load arbitrary external subresources.
+    const svgCsp = svg.headers.get("content-security-policy");
+    expect(svgCsp).toContain("sandbox");
+    expect(svgCsp).toContain("frame-ancestors");
+    expect(svgCsp).toContain("default-src 'none'");
     const svgBody = await svg.text();
     expect(svgBody).not.toContain("__FRAME_PREAMBLE");
     expect(svgBody).toContain("onload");
@@ -421,5 +435,33 @@ describe("publish endpoint (the artifact broker's backend)", () => {
     });
     expect(withParams.status).toBe(400);
     expect(await withParams.json()).toMatchObject({ code: "invalid_content" });
+  });
+
+  it("refuses a files publish that targets a <path>.type sidecar directly, end to end", async () => {
+    // Publishing the sidecar path itself is the vector `decodeFiles`'s
+    // contentType grammar doesn't reach: it validates the field named
+    // `contentType`, not a raw file whose own path happens to end in
+    // `.type`. Without the store-level rejection, this would 200, and every
+    // later GET of index.html would 500 (an invalid value handed straight to
+    // `Headers.set`) instead of serving the page.
+    const artifact = await create(server);
+    const poison = await fetch(`${server.shellOrigin}/api/frame/self/${artifact.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseVersion: "v1",
+        files: {
+          "index.html.type": { content: "text/plain\r\nx-evil: 1", contentType: "text/plain" },
+        },
+      }),
+    });
+    expect(poison.status).toBe(400);
+    expect(await poison.json()).toMatchObject({ code: "invalid_content" });
+
+    // index.html still serves normally: no sidecar was written.
+    const page = await fetch(frameUrl(server, artifact.id, "/_f/v1/index.html"));
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(await page.text()).toContain("window.__FRAME_PREAMBLE=");
   });
 });

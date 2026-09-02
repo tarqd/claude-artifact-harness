@@ -428,12 +428,15 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
     // there is no RTC lockdown and no __FRAME_PREAMBLE to gate script. A
     // writer-chosen type (SVG, XML, or an outright lie about a document)
     // must not be able to execute script if a viewer is navigated to it
-    // directly, so it gets an unconditional sandbox in place of the frame's
-    // normal CSP (subresource loads — scripts, images, fetches from within
-    // the enveloped page — are unaffected by this header on their own response).
+    // directly, so it gets an unconditional sandbox added on top of the
+    // frame's normal CSP — not in place of it, or `frame-ancestors`,
+    // `default-src 'none'` and the rest would drop out too, letting any
+    // origin frame the file or its document load arbitrary subresources
+    // (subresource loads made *from within* the enveloped page are on
+    // separate requests/responses and are unaffected by this header).
     return c.body(new Uint8Array(file.body), 200, {
       "content-type": file.contentType,
-      "content-security-policy": "sandbox",
+      "content-security-policy": `${frameCsp(ctx.shellOrigin, connectSrcOrigins(meta.capabilities))}; sandbox`,
     });
   });
 }

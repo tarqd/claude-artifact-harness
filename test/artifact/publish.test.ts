@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -137,6 +137,44 @@ describe("compare-and-set publish", () => {
       actor: null,
     });
     const file = await store.readVersionFile(id, "v2", "y.html");
+    expect(file?.contentType).toBe("text/html");
+  });
+
+  it("refuses a files publish that targets a <path>.type sidecar directly", async () => {
+    // Without this, `files: {"index.html.type": {...}}` would write straight
+    // to the sidecar `readVersionFile` reads back as index.html's declared
+    // content type — bypassing `contentType` validation for that path
+    // entirely, since the sidecar's own bytes were never checked as a media
+    // type at all.
+    await expect(
+      store.publish(id, {
+        baseVersion: "v1",
+        files: {
+          "index.html.type": {
+            content: Buffer.from("text/plain\r\nx-evil: 1"),
+            contentType: "text/plain",
+          },
+        },
+        actor: null,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_content" });
+    // nothing was written: index.html still serves its normal, sane type
+    expect((await store.readMeta(id))?.currentVersion).toBe("v1");
+    const file = await store.readVersionFile(id, "v1", "index.html");
+    expect(file?.contentType).toBe("text/html");
+  });
+
+  it("heals a sidecar already poisoned on disk instead of handing it to a header verbatim", async () => {
+    // Simulates a version published by a pre-fix build (or any other writer
+    // of the versions directory): the sidecar on disk is not a valid media
+    // type at all.
+    await writeFile(
+      join(dir, "artifacts", id, "versions", "v1", "index.html.type"),
+      "text/plain\r\nx-evil: 1",
+    );
+    const file = await store.readVersionFile(id, "v1", "index.html");
+    // Falls back to the extension guess rather than propagating the invalid
+    // sidecar value (which `Headers.set` would throw on at serve time).
     expect(file?.contentType).toBe("text/html");
   });
 
