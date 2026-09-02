@@ -129,20 +129,41 @@ exists to give them.
 | `ARTIFACT_OWNER_TOKEN` | unset | `/login?token=…` promotes a browser to owner; also guards the admin API as `Authorization: Bearer …` |
 | `ARTIFACT_OPEN_ADMIN` | unset | `1` serves the admin API (create/publish) to callers with no credential — local dev only |
 | `ARTIFACT_PREFIX_HOSTS` | unset | `1` serves the frame origin's `/_a/<artifactId>/…` tooling form on hosts with no artifact label — every artifact reached that way shares one origin |
-| `ARTIFACT_DEFAULT_LEVEL` | `interact` | level for other viewers: `view`, `interact` or `admin`. Only `admin` (and the owner) may publish |
+| `ARTIFACT_DEFAULT_LEVEL` | `interact` | level for other viewers: `view`, `interact` or `admin`. Only `admin` (and the owner) may publish. `interact` buys the capability calls, which spend the operator's credentials — set `view` on a server that is not on loopback (see below) |
 | `BIND_HOST` | `127.0.0.1` | address both apps listen on; set to `0.0.0.0` to expose them |
 | `ARTIFACT_TOKEN_TTL` | `1800` | asset-token lifetime, seconds |
 | `VERSION_POLL_MS` | `5000` | how often an open view polls for a new version (0 disables) |
 | `ANTHROPIC_API_KEY` | unset | the key `sample` calls the Anthropic API with. Without it (and without `SAMPLE_BACKEND=fake`) every `sample` call is refused `sampling_disabled` |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | where `sample` sends its requests — point it at a proxy or a gateway |
 | `SAMPLE_BACKEND` | unset | `fake` swaps the API for a deterministic in-process stand-in that echoes the prompt, streams in chunks and answers tool rounds. It is what the tests run against; use it for local development with no key |
-| `MCP_SERVERS` | unset | the connectors `mcp` can call, as JSON: `[{"name","url","headers"?,"transport"?,"noStore"?}]`. Every viewer shares them; a page addresses them by `name` |
+| `MCP_SERVERS` | unset | the connectors `mcp` can call, as JSON: `[{"name","url","headers"?,"transport"?,"noStore"?}]`. Every viewer shares them, credentials included; a page addresses them by `name` |
 | `MCP_SERVERS_FILE` | unset | the same JSON, read from a file |
 | `MCP_BACKEND` | unset | `fake` serves three deterministic in-process connectors (`Fake Tools`, `Needs Auth`, `No Store`) with no upstream at all. It is what the tests run against |
 
 `sample`'s three variables and `mcp`'s three are read from `process.env` by
 the slice, not from `ServerConfig`, so they are set the same way in
 `npm run dev` and in a test's `beforeAll`.
+
+### Credentials are shared by every viewer
+
+`ANTHROPIC_API_KEY` and the `MCP_SERVERS` headers belong to the operator, and
+this harness has no account service: every viewer of an artifact that declares
+`sample` or `mcp` spends *those* credentials. What decides who that is, is
+`ARTIFACT_DEFAULT_LEVEL`: `interact` — the default — gives the capability
+calls to anyone who can open the artifact, which is right on loopback, where
+that is the operator. The `mcp` lanes take only a browser the shell page has
+already given a viewer cookie to (a cookie-less client is `not_granted`, and
+no identity is minted for it) and only the `(server, tool)` pairs the
+artifact's manifest declares, but any visitor of a published artifact still
+reaches every tool in that manifest, writes included, with one consent dialog
+of their own.
+
+So on a server reachable by anyone else — `BIND_HOST` past loopback — set
+`ARTIFACT_DEFAULT_LEVEL=view` when a key or a connector is configured: only
+the owner (`/login?token=…`, or the artifact's creator) then reaches `sample`
+and `mcp`, and everyone else still views the page. The server prints a warning
+at boot when it is bound out, the default level is not `view`, and a key or a
+connector is set.
 
 ## HTTP surface
 

@@ -50,18 +50,31 @@ export class Auth {
     return value;
   }
 
+  /**
+   * The viewer this request already carries, or `null` when it brought no
+   * cookie of ours. Nothing is minted and no cookie is set: a route whose
+   * effect is not undoable — a connector call spending the operator's
+   * credential — wants a browser that has actually opened an artifact, not
+   * the identity `viewer()` hands to whoever asks.
+   */
+  existingViewer(c: Context): Viewer | null {
+    const id = this.unseal(getCookie(c, VIEWER_COOKIE));
+    if (!isUserId(id)) return null;
+    const owner = this.unseal(getCookie(c, OWNER_COOKIE));
+    return { id, isOwner: owner === id };
+  }
+
   /** Read the viewer cookie, minting and setting one when absent. */
   viewer(c: Context): Viewer {
-    const existing = this.unseal(getCookie(c, VIEWER_COOKIE));
-    const id = isUserId(existing) ? existing : mintUserId();
-    if (id !== existing) {
-      setCookie(c, VIEWER_COOKIE, this.seal(id), {
-        path: "/",
-        httpOnly: true,
-        sameSite: "Lax",
-        maxAge: 60 * 60 * 24 * 365,
-      });
-    }
+    const existing = this.existingViewer(c);
+    if (existing) return existing;
+    const id = mintUserId();
+    setCookie(c, VIEWER_COOKIE, this.seal(id), {
+      path: "/",
+      httpOnly: true,
+      sameSite: "Lax",
+      maxAge: 60 * 60 * 24 * 365,
+    });
     const owner = this.unseal(getCookie(c, OWNER_COOKIE));
     return { id, isOwner: owner === id };
   }

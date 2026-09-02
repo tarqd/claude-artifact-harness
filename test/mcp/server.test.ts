@@ -17,6 +17,7 @@ let dataDir: string;
 let artifactId: string;
 let plainId: string;
 let cookie: string;
+let readOnlyCookie: string;
 
 const PAGE = "<p>mcp fixture</p>";
 const MANIFEST = {
@@ -47,10 +48,16 @@ function post(path: string, body: unknown, target: RunningServer = server, heade
   });
 }
 
-const servers = (body: unknown = { artifactId }, target?: RunningServer): Promise<Response> =>
-  post("/api/frame/mcp/servers", body, target);
-const call = (body: Record<string, unknown>, target?: RunningServer): Promise<Response> =>
-  post("/api/frame/mcp/call", { artifactId, ...body }, target);
+const servers = (
+  body: unknown = { artifactId },
+  target?: RunningServer,
+  headers?: Record<string, string>,
+): Promise<Response> => post("/api/frame/mcp/servers", body, target, headers);
+const call = (
+  body: Record<string, unknown>,
+  target?: RunningServer,
+  headers?: Record<string, string>,
+): Promise<Response> => post("/api/frame/mcp/call", { artifactId, ...body }, target, headers);
 
 beforeAll(async () => {
   process.env.MCP_BACKEND = "fake";
@@ -62,6 +69,12 @@ beforeAll(async () => {
   const page = await fetch(`${server.shellOrigin}/a/${artifactId}`);
   cookie = (page.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   expect(cookie).toMatch(/^av=/);
+  // Each `startServer` mints its own secret, so the read-only instance needs
+  // a cookie of its own: `cookie` would not unseal there, and the request
+  // would be refused for having no session rather than for the level.
+  const roPage = await fetch(`${readOnly.shellOrigin}/a/${artifactId}`);
+  readOnlyCookie = (roPage.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  expect(readOnlyCookie).toMatch(/^av=/);
 });
 
 afterAll(async () => {
@@ -81,9 +94,20 @@ describe("the gate", () => {
   });
 
   it("refuses a viewer who may only view", async () => {
-    const response = await call({ server: "Fake Tools", tool: "echo", input: {} }, readOnly);
+    const before = fakeCallCount();
+    const response = await call({ server: "Fake Tools", tool: "echo", input: {} }, readOnly, {
+      cookie: readOnlyCookie,
+    });
     expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: "not_granted" });
+    // The message pins which refusal this is: with the session gate ahead of
+    // it, a cookie from the wrong instance would refuse for the wrong reason.
+    expect(await response.json()).toMatchObject({
+      code: "not_granted",
+      message: "this viewer may not use connectors here",
+    });
+    expect(fakeCallCount()).toBe(before);
+    const listing = await servers({ artifactId }, readOnly, { cookie: readOnlyCookie });
+    expect(listing.status).toBe(403);
   });
 
   it("refuses a body over the cap, declared or chunked", async () => {
@@ -112,6 +136,51 @@ describe("the gate", () => {
     // either way the server never buffered the four megabytes.
     if (chunked) expect(chunked.status).toBe(413);
     expect(sent).toBeLessThan(4_000_000);
+  });
+
+  it("refuses a caller with no viewer session, and never mints one", async () => {
+    const before = fakeCallCount();
+    const body = JSON.stringify({ artifactId, server: "Fake Tools", tool: "write", input: {} });
+    // A bare HTTP client: same-origin by omission (no Origin, no
+    // Sec-Fetch-Site), the right content type, a real artifact id — and no
+    // cookie. It must not become an `interact` viewer.
+    const anonymous = await fetch(`${server.shellOrigin}/api/frame/mcp/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(anonymous.status).toBe(403);
+    expect(await anonymous.json()).toMatchObject({ code: "not_granted" });
+    expect(anonymous.headers.get("set-cookie")).toBeNull();
+    expect(fakeCallCount()).toBe(before);
+    // A cookie that is not ours is no session either.
+    const forged = await post("/api/frame/mcp/call", { artifactId, server: "Fake Tools", tool: "write", input: {} }, server, {
+      cookie: "av=u_0123456789abcdefghijkl.notasignature",
+    });
+    expect(forged.status).toBe(403);
+    expect(fakeCallCount()).toBe(before);
+    // The listing lane is closed to it too, before the artifact is looked up.
+    const listing = await fetch(`${server.shellOrigin}/api/frame/mcp/servers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifactId }),
+    });
+    expect(listing.status).toBe(403);
+    expect(listing.headers.get("set-cookie")).toBeNull();
+    // And the refusal comes before the body is read, so an oversized body
+    // from a caller with no session is a 403, not a 413: nothing is buffered
+    // for it.
+    const oversized = await fetch(`${server.shellOrigin}/api/frame/mcp/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifactId, server: "Fake Tools", tool: "write", input: { big: "x".repeat(600_000) } }),
+    });
+    expect(oversized.status).toBe(403);
+    expect(await oversized.json()).toMatchObject({ code: "not_granted" });
+    // The shell page's own cookie still passes.
+    expect((await servers()).status).toBe(200);
+    const allowed = await call({ server: "Fake Tools", tool: "write", input: {} });
+    expect(allowed.status).toBe(200);
   });
 
   it("only accepts the shell page's own requests", async () => {
