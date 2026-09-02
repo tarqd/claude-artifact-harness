@@ -164,6 +164,24 @@ describe("compare-and-set publish", () => {
     expect(file?.contentType).toBe("text/html");
   });
 
+  it("refuses a <path>.TYPE sidecar path case-insensitively too", async () => {
+    // A case-insensitive filesystem would collide `index.html.TYPE` with the
+    // real `index.html.type` sidecar just as surely as the lowercase form.
+    await expect(
+      store.publish(id, {
+        baseVersion: "v1",
+        files: {
+          "index.html.TYPE": {
+            content: Buffer.from("text/plain\r\nx-evil: 1"),
+            contentType: "text/plain",
+          },
+        },
+        actor: null,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_content" });
+    expect((await store.readMeta(id))?.currentVersion).toBe("v1");
+  });
+
   it("heals a sidecar already poisoned on disk instead of handing it to a header verbatim", async () => {
     // Simulates a version published by a pre-fix build (or any other writer
     // of the versions directory): the sidecar on disk is not a valid media
@@ -226,5 +244,41 @@ describe("files-form validation in the frame", () => {
   it("refuses a non-object argument and an empty map", () => {
     expect(() => validateFiles([], true)).toThrowError();
     expect(() => validateFiles({}, true)).toThrowError();
+  });
+
+  // These four exercise the shared `isMediaType` grammar (protocol/paths.ts)
+  // through the frame's own validator, not just the server's: a check that
+  // only lived in `contentType.includes(";")` would miss all but the last.
+  it("refuses a content type carrying CR/LF", () => {
+    try {
+      validateFiles({ "a.txt": { content: "x", contentType: "text/plain\r\nx-evil: 1" } }, true);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toMatchObject({ code: "invalid_content" });
+    }
+  });
+
+  it("refuses a content type with a comma", () => {
+    try {
+      validateFiles({ "a.txt": { content: "x", contentType: "text/plain, x-evil" } }, true);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toMatchObject({ code: "invalid_content" });
+    }
+  });
+
+  it("refuses a content type longer than the grammar allows", () => {
+    const tooLong = `text/${"x".repeat(200)}`;
+    try {
+      validateFiles({ "a.txt": { content: "x", contentType: tooLong } }, true);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toMatchObject({ code: "invalid_content" });
+    }
+  });
+
+  it("accepts a content type after trim-and-lowercase normalisation", () => {
+    const out = validateFiles({ "a.txt": { content: "x", contentType: " TEXT/Plain " } }, true);
+    expect(out["a.txt"]).toMatchObject({ content: "x", contentType: " TEXT/Plain " });
   });
 });

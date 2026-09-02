@@ -33,6 +33,27 @@ const LEADING_DOCTYPE_RE = /^\s*<!doctype html[^>]*>/i;
 const DOCUMENT_CONTENT_TYPES = new Set(["text/html", "application/xhtml+xml"]);
 
 /**
+ * Script media types exempted from the `; sandbox` suffix (issue #16
+ * follow-up). CSP sandbox gives a `new Worker(...)` response an opaque
+ * origin, which the platform enforces even for a worker script — so
+ * sandboxing every non-document stored file would break an artifact that
+ * ships `new Worker('/_f/<ver>/w.js')` pointed at a stored `.js` file.
+ * Navigating to a script URL directly only ever renders it as inert text
+ * (browsers do not execute a top-level navigation's response as script), so
+ * exempting these leaks nothing: no document response becomes executable on
+ * the artifact origin. Includes the module-script case, which is also
+ * served as `text/javascript`. Every other non-document type (SVG, XML,
+ * everything else) keeps the sandbox.
+ */
+const SCRIPT_CONTENT_TYPES = new Set([
+  "text/javascript",
+  "application/javascript",
+  "application/x-javascript",
+  "application/ecmascript",
+  "text/ecmascript",
+]);
+
+/**
  * Elements whose content is text and not markup. A `<head` inside one of
  * them is the author's data, so the scanner steps over the whole element.
  */
@@ -434,9 +455,12 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
     // origin frame the file or its document load arbitrary subresources
     // (subresource loads made *from within* the enveloped page are on
     // separate requests/responses and are unaffected by this header).
+    // Script media types are the one exception: see SCRIPT_CONTENT_TYPES.
+    const csp = frameCsp(ctx.shellOrigin, connectSrcOrigins(meta.capabilities));
+    const contentTypeLower = file.contentType.toLowerCase();
     return c.body(new Uint8Array(file.body), 200, {
       "content-type": file.contentType,
-      "content-security-policy": `${frameCsp(ctx.shellOrigin, connectSrcOrigins(meta.capabilities))}; sandbox`,
+      "content-security-policy": SCRIPT_CONTENT_TYPES.has(contentTypeLower) ? csp : `${csp}; sandbox`,
     });
   });
 }

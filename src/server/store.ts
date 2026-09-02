@@ -301,8 +301,11 @@ export class Store {
         // as another file's content type: a direct publish to that literal
         // path would let a writer plant arbitrary bytes there (including a
         // value `Headers.set` rejects, or an unrelated file's declared type)
-        // without ever going through `contentType` validation.
-        if (path.endsWith(".type")) {
+        // without ever going through `contentType` validation. Checked
+        // case-insensitively: the filesystem backing this store may itself
+        // be case-insensitive, so `index.html.TYPE` would collide with the
+        // real sidecar just as surely as the lowercase form.
+        if (path.toLowerCase().endsWith(".type")) {
           throw capError("invalid_content", `${path}: reserved sidecar path`);
         }
         if (file === null) {
@@ -315,7 +318,7 @@ export class Store {
       // Files carried over from the previous version count against the same
       // budget: the limit is on a version, not on one call's payload.
       for (const path of carried) {
-        const base = path.endsWith(".type") ? path.slice(0, -5) : path;
+        const base = path.toLowerCase().endsWith(".type") ? path.slice(0, -5) : path;
         if (replaced.has(base) || deleted.has(base) || replaced.has(path)) continue;
         bytes += await this.fileSize(id, meta.currentVersion, path);
       }
@@ -342,7 +345,7 @@ export class Store {
       }
 
       for (const path of carried) {
-        const base = path.endsWith(".type") ? path.slice(0, -5) : path;
+        const base = path.toLowerCase().endsWith(".type") ? path.slice(0, -5) : path;
         if (replaced.has(base) || deleted.has(base) || replaced.has(path)) continue;
         const existing = await this.readVersionFile(id, meta.currentVersion, path);
         if (existing) await this.writeVersionFile(id, version, path, existing.body);

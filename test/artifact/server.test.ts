@@ -298,6 +298,7 @@ describe("frame origin", () => {
           "y.html": { content: "<p>y</p>", contentType: "TEXT/HTML" },
           "p.xhtml": { content: "<p>p</p>", contentType: "application/xhtml+xml" },
           "a.svg": { content: "<svg onload=\"alert(1)\"></svg>", contentType: "image/svg+xml" },
+          "w.js": { content: "postMessage('hi')", contentType: "text/javascript" },
         },
       }),
     });
@@ -326,6 +327,18 @@ describe("frame origin", () => {
     const svgBody = await svg.text();
     expect(svgBody).not.toContain("__FRAME_PREAMBLE");
     expect(svgBody).toContain("onload");
+
+    // A stored script file is the one non-document type exempted from the
+    // sandbox suffix: CSP sandbox gives a `new Worker(...)` response an
+    // opaque origin (the platform enforces sandbox for worker scripts too),
+    // which would break `new Worker('/_f/<ver>/w.js')` for an artifact that
+    // ships a worker. It still keeps the rest of the frame's CSP.
+    const js = await fetch(frameUrl(server, artifact.id, `/_f/${version}/w.js`));
+    expect(js.status).toBe(200);
+    const jsCsp = js.headers.get("content-security-policy");
+    expect(jsCsp).not.toContain("sandbox");
+    expect(jsCsp).toContain("frame-ancestors");
+    expect(jsCsp).toContain("default-src 'none'");
   });
 });
 
