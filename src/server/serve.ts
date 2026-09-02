@@ -276,15 +276,6 @@ const LOGIN_HEADERS = {
  */
 const HSTS = "max-age=31536000; includeSubDomains";
 
-/**
- * The header a browser needs so that the *next* bare-host visit never leaves
- * as plain http for an on-path attacker to hold. Empty on http, where the
- * header would strand the deployment on a scheme it does not serve.
- */
-function tlsHeaders(ctx: ServerContext): Record<string, string> {
-  return usesTls(ctx.config) ? { "strict-transport-security": HSTS } : {};
-}
-
 const LOGIN_CSS = `:root{color-scheme:light dark}
 body{margin:0;display:grid;place-items:center;min-height:100vh;background:#faf9f5;color:#141413;
 font:14px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}
@@ -317,14 +308,15 @@ export function renderLoginPage(next: string | undefined, message: string | null
 
 /**
  * The `next` a login may bounce to: our own origin, and path-shaped. The
- * prefix is not the test — `//evil.example/x` and `/\evil.example` both
- * start with `/` and are read by a browser as another host — so the value is
- * resolved against the shell origin and the resolved origin is compared.
+ * prefix of the *input* is not the test — `//evil.example/x` and
+ * `/\evil.example` both start with `/` and are read by a browser as another
+ * host, and `/..//evil.example/x` normalises into one — so the value is
+ * resolved against the shell origin and the string that is actually handed
+ * back is the one checked: resolution collapses dot segments, and a
+ * protocol-relative path can only appear after that.
  */
 export function safeNext(next: string | undefined, shellOrigin: string): string | null {
-  if (!next || !next.startsWith("/") || next.startsWith("//") || next.startsWith("/\\")) {
-    return null;
-  }
+  if (!next || !next.startsWith("/")) return null;
   let url: URL;
   try {
     url = new URL(next, shellOrigin);
@@ -332,7 +324,9 @@ export function safeNext(next: string | undefined, shellOrigin: string): string 
     return null;
   }
   if (url.origin !== shellOrigin) return null;
-  return url.pathname + url.search;
+  const path = url.pathname + url.search;
+  if (path.startsWith("//") || path.startsWith("/\\")) return null;
+  return path;
 }
 
 /**
@@ -436,7 +430,16 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
   // whole internet shares one bucket) is the only outcome a global counter
   // would have.
   const loginLimit = new RateLimiter(LOGIN_ATTEMPTS_PER_WINDOW);
-  const loginHeaders = { ...LOGIN_HEADERS, ...tlsHeaders(ctx) };
+
+  // HSTS belongs on every response this origin makes, not just the ones that
+  // set cookies: `/` is the bare-host URL an operator hands out, so it is the
+  // first plain-http request an on-path attacker gets to hold. This runs
+  // before `mountCapabilityRoutes` (index.ts), so the slice routes are
+  // covered too — the same posture `mountFrameRoutes` takes.
+  app.use("*", async (c, next) => {
+    await next();
+    if (usesTls(ctx.config)) c.header("strict-transport-security", HSTS);
+  });
 
   /**
    * The form. It carries no token itself, so this page is safe to link, to
@@ -448,7 +451,7 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
       // the form, so an off-origin one never reaches the operator's browser.
       renderLoginPage(safeNext(c.req.query("next"), ctx.shellOrigin) ?? undefined, message),
       status,
-      loginHeaders,
+      LOGIN_HEADERS,
     );
 
   app.get("/login", (c) => {
@@ -471,24 +474,24 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
       (origin !== undefined && origin !== ctx.shellOrigin) ||
       (site !== undefined && site !== "same-origin" && site !== "none")
     ) {
-      return c.text("cross-site login is refused", 403, loginHeaders);
+      return c.text("cross-site login is refused", 403, LOGIN_HEADERS);
     }
     const body = await readLoginBody(c);
-    if ("error" in body) return c.text(body.error, body.status, loginHeaders);
+    if ("error" in body) return c.text(body.error, body.status, LOGIN_HEADERS);
     // The credential decides first, and only a wrong answer spends budget:
     // the operator's correct token is never throttled by someone else's
     // guessing, while guessing itself stays bounded.
     if (!ctx.auth.login(c, body.token)) {
       return loginLimit.allow(clientKey(c))
-        ? c.text("invalid owner token", 403, loginHeaders)
-        : c.text("too many login attempts - wait a minute", 429, loginHeaders);
+        ? c.text("invalid owner token", 403, LOGIN_HEADERS)
+        : c.text("too many login attempts - wait a minute", 429, LOGIN_HEADERS);
     }
     // `next` is attacker-reachable: it survives from a link into the form's
     // hidden field, so a bare `startsWith("/")` would make this an open
     // redirect the operator walks into by typing their own token.
     const target = safeNext(body.next ?? c.req.query("next"), ctx.shellOrigin);
     if (target) return c.redirect(target, 303);
-    return c.text("logged in as the owner", 200, loginHeaders);
+    return c.text("logged in as the owner", 200, LOGIN_HEADERS);
   });
 
   app.get("/_shell/shell.js", async (c) => {
@@ -519,7 +522,6 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
     return c.html(renderShellPage(boot), 200, {
       "content-security-policy": "frame-ancestors 'none'",
       "x-content-type-options": "nosniff",
-      ...tlsHeaders(ctx),
     });
   });
 

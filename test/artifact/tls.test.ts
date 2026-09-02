@@ -356,9 +356,18 @@ describe("login", () => {
     expect(inside.headers.get("location")).toBe("/a/x?v=1");
 
     // Every one of these starts with `/`, which is why the prefix alone was
-    // never a test: a browser reads them as another host. The last one leans
-    // on URL parsing dropping the tab, so only resolving catches it.
-    for (const away of ["//evil.example/x", "/\\evil.example", "/\t/evil.example", "https://evil.example/x"]) {
+    // never a test: a browser reads them as another host. The tab one leans
+    // on URL parsing dropping the tab, and the last two are protocol-relative
+    // only *after* resolution collapses their dot segments - so the check has
+    // to run on the string that is handed back, not on the one that came in.
+    for (const away of [
+      "//evil.example/x",
+      "/\\evil.example",
+      "/\t/evil.example",
+      "https://evil.example/x",
+      "/..//evil.example/x",
+      "/%2e%2e//evil.example",
+    ]) {
       const response = await post(away);
       expect(response.status).toBe(200);
       expect(response.headers.get("location")).toBeNull();
@@ -368,6 +377,10 @@ describe("login", () => {
   it("never carries an off-origin next into the form", async () => {
     const away = await fetch(`${server.shellOrigin}/login?next=%2F%2Fevil.example%2Fx`);
     expect(await away.text()).not.toContain("evil.example");
+    // The hidden field is where a link's `next` reaches the operator, so the
+    // normalising form has to be refused here too and not just at the bounce.
+    const dots = await fetch(`${server.shellOrigin}/login?next=%2F..%2F%2Fevil.example%2Fx`);
+    expect(await dots.text()).not.toContain("evil.example");
     const inside = await fetch(`${server.shellOrigin}/login?next=%2Fa%2Fx`);
     expect(await inside.text()).toContain('name="next" value="/a/x"');
   });
@@ -495,6 +508,8 @@ describe("HSTS", () => {
     // serve, so it is exactly as absent as the scheme is.
     const plain = await fetch(`${server.shellOrigin}/login`);
     expect(plain.headers.get("strict-transport-security")).toBeNull();
+    const plainRoot = await fetch(`${server.shellOrigin}/`);
+    expect(plainRoot.headers.get("strict-transport-security")).toBeNull();
 
     const tls = await startServer({
       shellPort: 0,
@@ -509,6 +524,14 @@ describe("HSTS", () => {
       const login = await fetch(`http://127.0.0.1:${tls.shellPort}/login`);
       expect(login.headers.get("strict-transport-security")).toBe(HSTS);
 
+      // `/` is the bare-host URL an operator hands out, so it is the first
+      // plain-http request HSTS exists to stop an on-path attacker holding.
+      const root = await fetch(`http://127.0.0.1:${tls.shellPort}/`);
+      expect(root.status).toBe(200);
+      expect(root.headers.get("strict-transport-security")).toBe(HSTS);
+      const bundle = await fetch(`http://127.0.0.1:${tls.shellPort}/_shell/shell.js`);
+      expect(bundle.headers.get("strict-transport-security")).toBe(HSTS);
+
       const created = await fetch(`http://127.0.0.1:${tls.shellPort}/api/artifacts`, {
         method: "POST",
         headers: {
@@ -517,6 +540,7 @@ describe("HSTS", () => {
         },
         body: JSON.stringify({ html: fixture, capabilities: {} }),
       });
+      expect(created.headers.get("strict-transport-security")).toBe(HSTS);
       const { id } = (await created.json()) as { id: string };
       const shell = await fetch(`http://127.0.0.1:${tls.shellPort}/a/${id}`);
       expect(shell.headers.get("strict-transport-security")).toBe(HSTS);
