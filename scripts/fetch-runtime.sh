@@ -23,8 +23,21 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/reference"
 mkdir -p "$OUT/runtime" "$OUT/shell"
 
+# Tracks whether any required (non-extra) fetch failed, so the script can
+# keep going where it safely can but still report failure at the end instead
+# of exiting 0.
+FETCH_FAILED=0
+SKIP_SHELL=0
+
 # 1. The shell page: it embeds the preamble that names the current runtime files.
-curl -sSL --fail --proto '=https' "https://claude.ai/code/artifact/${UUID}" -o "$OUT/shell/served.html"
+# This fetch is authenticated (claude.ai session cookies); a 401/403 here must
+# not abort the whole script before the runtime bundles below are fetched, so
+# handle failure explicitly rather than letting set -e kill the script.
+if ! curl -sSL --fail --proto '=https' "https://claude.ai/code/artifact/${UUID}" -o "$OUT/shell/served.html"; then
+  echo "warn: shell page fetch failed (unauthenticated? 401/403); shell-bundle step will be skipped" >&2
+  FETCH_FAILED=1
+  SKIP_SHELL=1
+fi
 
 # 2. Runtime module names come from window.__FRAME_PREAMBLE in the artifact's
 #    own served HTML, which needs an authenticated read (Artifact tool, action:
@@ -37,15 +50,25 @@ for f in $LIST; do
 done
 
 # 3. Shell bundles referenced by served.html.
-grep -o "$ASSETS/[A-Za-z0-9._-]*\.js" "$OUT/shell/served.html" | sort -u | while read -r url; do
-  f="$(basename "$url")"
-  curl -sSL --fail --proto '=https' "$url" -o "$OUT/shell/$f"
-  echo "shell/$f $(wc -c < "$OUT/shell/$f")"
-done
+if [ "$SKIP_SHELL" -eq 0 ]; then
+  grep -o "$ASSETS/[A-Za-z0-9._-]*\.js" "$OUT/shell/served.html" | sort -u | while read -r url; do
+    f="$(basename "$url")"
+    curl -sSL --fail --proto '=https' "$url" -o "$OUT/shell/$f"
+    echo "shell/$f $(wc -c < "$OUT/shell/$f")"
+  done
+else
+  echo "warn: skipping shell-bundle step (no served.html)" >&2
+fi
 
-# 3b. Lazily loaded shell chunks not referenced from served.html (names captured 2026-09-01).
+# 3b. Lazily loaded shell chunks not referenced from served.html (names captured
+# 2026-09-01). These are optional/best-effort: a missing chunk is reported but
+# does not fail the script.
 for f in $SHELL_EXTRA; do
-  curl -sSL --fail --proto '=https' "$ASSETS/$f" -o "$OUT/shell/$f" && echo "shell/$f $(wc -c < "$OUT/shell/$f")"
+  if curl -sSL --fail --proto '=https' "$ASSETS/$f" -o "$OUT/shell/$f"; then
+    echo "shell/$f $(wc -c < "$OUT/shell/$f")"
+  else
+    echo "warn: shell/$f unavailable (skipped)" >&2
+  fi
 done
 
 # 3c. The platform preamble, from a served artifact page.
@@ -67,4 +90,9 @@ if command -v npx >/dev/null; then
   for f in "$OUT"/runtime/*.js "$OUT"/shell/*.js; do
     npx --yes js-beautify@1.15.4 -s 2 "$f" > "$f.pretty" 2>/dev/null || true
   done
+fi
+
+if [ "$FETCH_FAILED" -ne 0 ]; then
+  echo "fetch-runtime.sh: one or more required fetches failed" >&2
+  exit 1
 fi

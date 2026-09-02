@@ -9,4 +9,5 @@ reference/shell/
 # Local secrets (ANTHROPIC_API_KEY, ARTIFACT_OWNER_TOKEN, MCP_SERVERS, etc.)
 .env
 .env.*
+!.env.example
 *.local
