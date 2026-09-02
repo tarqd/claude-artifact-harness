@@ -50,20 +50,33 @@ export class Auth {
     return value;
   }
 
+  /**
+   * The viewer this request already carries a signed cookie for, or `null`
+   * when it carries none. `viewer()` mints an id — and sets a cookie — for
+   * such a request, so a budget keyed on that id is one a cookie-less caller
+   * renews on every request: anything counting per viewer reads this instead,
+   * and mints only once it has decided to serve the call.
+   */
+  existingViewer(c: Context): Viewer | null {
+    const id = this.unseal(getCookie(c, VIEWER_COOKIE));
+    if (!isUserId(id)) return null;
+    return { id, isOwner: this.unseal(getCookie(c, OWNER_COOKIE)) === id };
+  }
+
   /** Read the viewer cookie, minting and setting one when absent. */
   viewer(c: Context): Viewer {
-    const existing = this.unseal(getCookie(c, VIEWER_COOKIE));
-    const id = isUserId(existing) ? existing : mintUserId();
-    if (id !== existing) {
-      setCookie(c, VIEWER_COOKIE, this.seal(id), {
-        path: "/",
-        httpOnly: true,
-        sameSite: "Lax",
-        maxAge: 60 * 60 * 24 * 365,
-      });
-    }
-    const owner = this.unseal(getCookie(c, OWNER_COOKIE));
-    return { id, isOwner: owner === id };
+    const existing = this.existingViewer(c);
+    if (existing) return existing;
+    // A minted id is nobody's owner: the owner cookie names an id that
+    // already existed.
+    const id = mintUserId();
+    setCookie(c, VIEWER_COOKIE, this.seal(id), {
+      path: "/",
+      httpOnly: true,
+      sameSite: "Lax",
+      maxAge: 60 * 60 * 24 * 365,
+    });
+    return { id, isOwner: false };
   }
 
   /** `/login?token=<ARTIFACT_OWNER_TOKEN>` promotes this browser to owner. */
