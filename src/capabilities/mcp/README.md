@@ -157,23 +157,25 @@ under `mcp`, frozen.
 routes accept only the shell page's own requests (`application/json`, and
 neither a `Sec-Fetch-Site` nor an `Origin` naming another site — a
 cross-site "simple" POST would otherwise run a tool with no dialog, cookie
-or not), require the artifact to declare `mcp` and the viewer to be able
-to interact (`view` → `not_granted`), and meter the body against a 512 KiB
-cap as it streams. That origin check and that metered body reader are the
+or not), require the artifact to declare `mcp` and the viewer to be able to
+interact (`view` → `not_granted`), and meter the body against a 512 KiB cap
+as it streams. That origin check and that metered body reader are the
 spine's (`src/server/guard.ts`), shared with `sample`; this slice supplies
-only its own limit and its own error vocabulary. `/servers` answers the manifest intersected with the
-directory: a server the directory does not know or a `host:` one is
-omitted; a server that fails to list answers with an empty tool set and its
-auth status. `/call` re-checks the manifest, refuses `host:` servers and
-non-object arguments, holds at most 8 calls per viewer and 64 in flight
-server-wide (`rate_limited`), gives a call 120 s and aborts it when the
-client goes away, refuses a result over 4 MB, and maps every failure to a
-page code and a status. Results go back as the connector produced them:
-`content`, `structuredContent`, `isError`. The client pool keeps one
-connection per configured server for every viewer: a request's own timeout
-or HTTP status never drops it (that would fail everyone else's calls), only
-a dead transport does, and a lapsed credential forgets the tool listing so
-`listTools` stops reporting the connector as connected.
+only its own limit and its own error vocabulary. The check bounds which
+*origins* may drive the lane in a browser, not who can reach the port: see
+the note at the top of `guard.ts`. `/servers` answers the manifest
+intersected with the directory: a server the directory does not know or a
+`host:` one is omitted; a server that fails to list answers with an empty
+tool set and its auth status. `/call` re-checks the manifest, refuses
+`host:` servers and non-object arguments, holds at most 8 calls per viewer
+and 64 in flight server-wide (`rate_limited`), gives a call 120 s and aborts
+it when the client goes away, refuses a result over 4 MB, and maps every
+failure to a page code and a status. Results go back as the connector
+produced them: `content`, `structuredContent`, `isError`. The client pool
+keeps one connection per configured server for every viewer: a request's own
+timeout or HTTP status never drops it (that would fail everyone else's
+calls), only a dead transport does, and a lapsed credential forgets the tool
+listing so `listTools` stops reporting the connector as connected.
 
 ## Deviations from the platform, and why
 

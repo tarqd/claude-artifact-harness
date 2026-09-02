@@ -368,7 +368,9 @@ describe("POST /api/frame/sample/call", () => {
 /**
  * A completion spends the operator's API key, so the route has to be sure the
  * shell page asked and that the asker holds a viewer cookie the server itself
- * signed. Neither a cross-site "simple" POST nor a bare HTTP client has both.
+ * signed. That refuses the cross-site "simple" POST outright. It does not
+ * refuse a bare HTTP client, which writes its own headers and can mint itself
+ * a cookie off `/a/:id`; the last case here pins that limit deliberately.
  */
 describe("the origin and cookie guard", () => {
   const body = (): string =>
@@ -426,6 +428,30 @@ describe("the origin and cookie guard", () => {
     expect((await response.json()) as { code: string }).toMatchObject({ code: "not_granted" });
     expect(response.headers.get("set-cookie")).toBe(null);
     expect(fakeBackendCallCount()).toBe(before);
+  });
+
+  /**
+   * The edge of what this guard is: a boundary against other origins in a
+   * browser, not against whoever can reach the port. `GET /a/:id` mints a
+   * viewer cookie for any anonymous request, so a non-browser caller pays one
+   * extra GET and then looks exactly like the shell page — it sends no
+   * `Origin` and no `Sec-Fetch-Site` at all, which the guard has to allow
+   * because same-origin browsers omit them too. Closing this means a
+   * credential on the shell's front door; if that ever lands, this test
+   * flips and the claims in `guard.ts` and the slice README change with it.
+   */
+  it("still serves a header-less client holding a cookie minted by /a/:id", async () => {
+    const before = fakeBackendCallCount();
+    const bootstrapped = await shellCookie(server);
+    expect(bootstrapped).not.toBe(cookie);
+    const response = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: bootstrapped },
+      body: body(),
+    });
+    expect(response.status).toBe(200);
+    await collect(response);
+    expect(fakeBackendCallCount()).toBeGreaterThan(before);
   });
 
   it("refuses the tool-results lane on the same terms", async () => {

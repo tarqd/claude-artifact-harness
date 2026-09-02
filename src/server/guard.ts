@@ -5,16 +5,28 @@
  * A viewer's consent for a capability lives in the shell page — never in a
  * header the caller writes — so a lane with side effects (running a connector
  * tool, spending the operator's model budget) has to establish that the shell
- * page is what asked before it does anything. Two callers it must not serve:
- * a browser on any site the viewer happens to visit, which can send a "simple"
- * cross-site POST with no preflight (`text/plain`, `mode: "no-cors"`) and get
- * the effect even though the answer is opaque to it; and a bare HTTP client,
- * which sends whatever it likes and holds no cookie at all.
+ * page is what asked before it does anything.
  *
- * `sameOriginOnly` closes the first. The second is closed by the lane itself
- * asking `auth.existingViewer` rather than `auth.viewer`: an API route must
- * never mint an identity, because minting one is precisely what turns a
- * credential-less caller into an accepted viewer.
+ * `sameOriginOnly` closes the browser-driven vector, which is the one the
+ * viewer cannot avoid: any site they happen to visit can send a "simple"
+ * cross-site POST with no preflight (`text/plain`, `mode: "no-cors"`) and get
+ * the effect even though the answer is opaque to it. Demanding
+ * `application/json` takes that shape away — a JSON POST is preflighted, and
+ * the lane answers `OPTIONS` with nothing — and the `Sec-Fetch-Site` and
+ * `Origin` checks refuse what a browser does send from elsewhere.
+ *
+ * What it does not close is a bare HTTP client, which writes its own headers:
+ * it omits `Sec-Fetch-Site` and `Origin` and sets the content type. A lane
+ * asking `auth.existingViewer` rather than `auth.viewer` narrows that less
+ * than it looks. It is still worth doing — an API lane that minted an identity
+ * would hand a credential to a refused caller, and metering (`takeStream`)
+ * wants an id this server signed — but the cookie is not scarce: `GET /a/:id`
+ * (`serve.ts`) mints and sets one for any anonymous request, so a client that
+ * can reach the port bootstraps a viewer with one extra GET. Only a credential
+ * on the shell's own front door would change that, and gating `/a/:id` is a
+ * separate question from this guard. So read the guard as a boundary against
+ * other origins in a browser, not against the network: do not expose the shell
+ * (`BIND_HOST=0.0.0.0`) to a network you would not give the key to.
  *
  * Only the lanes that call it are guarded today (`mcp`, `sample`). It is kept
  * request-shaped, with no per-lane state, so that issue #7 can mount it as one
@@ -52,10 +64,11 @@ export interface Lane {
 }
 
 /**
- * Only the shell page may call this lane. A request from any other site —
- * which the browser would otherwise send as a "simple" cross-site POST, with
- * the cookie under `SameSite=Lax` left off but the effect still happening —
- * is refused before the body is read.
+ * Only the shell page may call this lane from a browser. A request from any
+ * other site — which the browser would otherwise send as a "simple" cross-site
+ * POST, with the cookie under `SameSite=Lax` left off but the effect still
+ * happening — is refused before the body is read. See the note at the top of
+ * this file for what this does not stop.
  */
 export function sameOriginOnly(c: Context, ctx: ServerContext, lane: Lane): void {
   const contentType = (c.req.header("content-type") ?? "").toLowerCase();

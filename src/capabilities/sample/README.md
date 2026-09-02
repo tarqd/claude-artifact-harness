@@ -95,13 +95,20 @@ imports the other.
   spine guard (`src/server/guard.ts`): the request must be `application/json`
   and carry neither a `Sec-Fetch-Site` nor an `Origin` naming another site,
   and it must already hold a viewer cookie this server signed
-  (`auth.existingViewer`, never `auth.viewer` — an API lane that minted an
-  identity would accept a caller that has none). Consent for `sample` lives in
+  (`auth.existingViewer`, never `auth.viewer` — an API lane should not hand an
+  identity to a caller it is about to refuse). Consent for `sample` lives in
   the shell page's `localStorage`, so the server cannot see it; what it can
   see is whether the shell page is what asked. Without this a "simple"
   cross-site POST (`text/plain`, `mode: "no-cors"`) from any site the viewer
-  visits — or a bare HTTP client that knows an artifact id — drives
-  completions on the operator's key.
+  visits drives completions on the operator's key with no dialog and no
+  cookie.
+- What this does **not** stop is a bare HTTP client on the same network: it
+  writes its own headers, so it simply sends no `Sec-Fetch-Site` and no
+  `Origin`, and the viewer cookie is free — `GET /a/:id` mints one for any
+  anonymous request, so it costs one extra GET. The guard is a boundary
+  against other origins in a browser, not against whoever can reach the port;
+  closing that means a credential on the shell's front door, not another check
+  on this lane. Do not set `BIND_HOST=0.0.0.0` on a network you do not trust.
 - Every page-side limit is re-checked here, because this route — not the
   shell page — is what a direct HTTP caller meets: a body over 8 MB is
   `too_large` (413) before it is parsed; `images`/`tools` are refused as
@@ -132,7 +139,8 @@ Environment: `ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL`,
   surface names only the call route; a tool round needs a way back in while
   the SSE response is still open. The shell posts the page's results there
   with the `callId` it generated; it meets the same origin-and-cookie guard as
-  the call, and only the viewer whose call is waiting may answer it. Nothing about the frame↔shell protocol changes.
+  the call, and only the viewer whose call is waiting may answer it. Nothing
+  about the frame↔shell protocol changes.
 - **`fetch` instead of `ctx.api` for the stream.** `BrokerContext.api` parses
   one JSON body; SSE needs the raw response. The broker still calls its own
   origin with `credentials: "same-origin"`, so no credential is handled in
