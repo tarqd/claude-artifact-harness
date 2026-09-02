@@ -30,8 +30,8 @@
  *
  * Only the lanes that call it are guarded today (`mcp`, `sample`). It is kept
  * request-shaped, with no per-lane state, so that issue #7 can mount it as one
- * Hono middleware over every `/api/frame/*` and `/api/account` POST; until then
- * the db, user, artifact and account lanes are still unguarded.
+ * Hono middleware over every shell-origin POST; until then the db, user,
+ * artifact and assets (`/api/frame/blob/*`) POST lanes are still unguarded.
  */
 import type { Context } from "hono";
 import { capError, type CapError } from "../protocol/errors.ts";
@@ -91,13 +91,15 @@ export function sameOriginOnly(c: Context, ctx: ServerContext, lane: Lane): void
  * after it has been buffered whole.
  */
 export async function readJsonBody(c: Context, lane: Lane): Promise<Record<string, unknown>> {
-  const tooLarge = (): never => refuse(413, "too_large", "the request body is too large");
+  function tooLarge(): never {
+    refuse(413, "too_large", "the request body is too large");
+  }
   const declared = Number(c.req.header("content-length") ?? "");
   if (Number.isFinite(declared) && declared > lane.maxBodyBytes) tooLarge();
   let bytes: Uint8Array;
   const stream = c.req.raw.body;
   if (!stream) {
-    bytes = new Uint8Array(await c.req.arrayBuffer());
+    bytes = new Uint8Array(await c.req.arrayBuffer().catch(() => new ArrayBuffer(0)));
     if (bytes.byteLength > lane.maxBodyBytes) tooLarge();
   } else {
     const reader = stream.getReader();
@@ -105,7 +107,9 @@ export async function readJsonBody(c: Context, lane: Lane): Promise<Record<strin
     let total = 0;
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        // A body that stops arriving (the client reset or went away) is the
+        // client's bad request, not this server's error.
+        const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
         if (done) break;
         if (!value) continue;
         total += value.byteLength;
