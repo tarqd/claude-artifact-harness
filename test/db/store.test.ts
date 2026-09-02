@@ -239,8 +239,8 @@ describe("on-disk names", () => {
     `${path.split("/").map(encodeURIComponent).join("__")}.json`;
 
   it("gives every path in the grammar its own file", () => {
-    // "_" and "/" both live inside the segment grammar, so a separator-joined
-    // encoding cannot separate these paths; the hash must.
+    // "_" lives inside the segment grammar and "/" is the separator, so a
+    // joiner-based encoding cannot separate these paths; the hash must.
     expect(docFileName("data/users/u_1/profile")).not.toBe(docFileName("data__users__u_1/profile"));
     const alphabet = ["a", "_", "__", "-", ".", "~", ":", "@", "+", "x_y"];
     const paths = new Set<string>();
@@ -297,6 +297,29 @@ describe("on-disk names", () => {
       expect(await readdir(dir)).not.toContain(docFileName(path));
       // And it stays gone once the index is rebuilt from disk.
       expect(await new DbStore(legacyDir).read(DISK, path)).toBeNull();
+    } finally {
+      await rm(legacyDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a hashed file outrank a legacy twin, whichever readdir lists first", async () => {
+    const legacyDir = await mkdtemp(join(tmpdir(), "db-twin-"));
+    try {
+      const dir = join(legacyDir, "artifacts", DISK, "db");
+      const path = "tasks/twin";
+      await rm(dir, { recursive: true, force: true });
+      // The newer write already lives under the hashed name...
+      await new DbStore(legacyDir).set(DISK, path, { v: "new" });
+      // ...and an older build's file for the same path is still lying around.
+      const stale = { path, data: { v: "legacy" }, rev: 1, updatedAt: "2026-01-01T00:00:00.000Z" };
+      await writeFile(join(dir, legacyName(path)), JSON.stringify(stale));
+
+      const store = new DbStore(legacyDir);
+      expect((await store.read(DISK, path))?.data).toEqual({ v: "new" });
+      const after = await readdir(dir);
+      expect(after).toContain(docFileName(path));
+      expect(after).not.toContain(legacyName(path));
+      expect(JSON.parse(await readFile(join(dir, docFileName(path)), "utf8")).data).toEqual({ v: "new" });
     } finally {
       await rm(legacyDir, { recursive: true, force: true });
     }

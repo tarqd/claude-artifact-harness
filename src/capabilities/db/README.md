@@ -81,11 +81,12 @@ lane too, and the refresh timer stops as soon as nothing is subscribed.
   page cannot reach another artifact's rows and one grant cannot be replayed
   into unbounded subscriptions.
 - One JSON file per document under `artifacts/<id>/db/`, named `sha256(path)`
-  so two paths can never share a file (`_` and `/` are both inside the segment
-  grammar) and no path is too long to name; the path itself is carried in the
-  file. Files written under the older readable naming are renamed on load. An
-  in-memory index rebuilt on first touch, and a single-process write lock per
-  artifact.
+  so two paths can never share a file (`_` is inside the segment grammar and
+  `/` is the separator, so no readable joiner is unambiguous) and no path is
+  too long to name; the path itself is carried in the file. Files written
+  under the older readable naming are moved onto the hashed name on load, and
+  one that already has a hashed twin is dropped in its favour. An in-memory
+  index rebuilt on first touch, and a single-process write lock per artifact.
   Last-writer-wins; `update` merges nested objects recursively, replaces
   everything else, and rejects `invalid_argument` when the document is
   absent; `delete` is idempotent and leaves nested documents alone.
