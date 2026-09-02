@@ -10,6 +10,7 @@ import {
   DbStore,
   DEFAULT_TTL_MS,
   MAX_DOC_DEPTH,
+  MAX_FIELD_NAME_BYTES,
   MAX_TTL_MS,
   MIN_TTL_MS,
   jsonDepth,
@@ -183,6 +184,52 @@ describe("queries", () => {
     expect(() =>
       validateQuerySpec({ collection: "items", where: [{ f: "n", op: "like", v: 1 }] }),
     ).toThrow(invalid);
+  });
+
+  it("bounds a filter value's serialized size, sealed into the grant as it is", () => {
+    expect(() =>
+      validateQuerySpec({
+        collection: "items",
+        where: [{ f: "n", op: "==", v: "x".repeat(4097) }],
+      }),
+    ).toThrow(invalid);
+    // Right at the bound is still fine.
+    expect(() =>
+      validateQuerySpec({
+        collection: "items",
+        where: [{ f: "n", op: "==", v: "x".repeat(4093) }], // + 2 quotes = 4095
+      }),
+    ).not.toThrow();
+  });
+
+  it("bounds a filter field name's serialized size, sealed into the grant as it is", () => {
+    expect(() =>
+      validateQuerySpec({
+        collection: "items",
+        where: [{ f: "x".repeat(MAX_FIELD_NAME_BYTES + 1), op: "==", v: 1 }],
+      }),
+    ).toThrow(invalid);
+    expect(() =>
+      validateQuerySpec({
+        collection: "items",
+        where: [{ f: "x".repeat(MAX_FIELD_NAME_BYTES), op: "==", v: 1 }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("bounds an orderBy field name's serialized size", () => {
+    expect(() =>
+      validateQuerySpec({
+        collection: "items",
+        orderBy: { f: "x".repeat(MAX_FIELD_NAME_BYTES + 1) },
+      }),
+    ).toThrow(invalid);
+    expect(() =>
+      validateQuerySpec({
+        collection: "items",
+        orderBy: { f: "x".repeat(MAX_FIELD_NAME_BYTES) },
+      }),
+    ).not.toThrow();
   });
 });
 

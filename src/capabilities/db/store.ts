@@ -40,6 +40,10 @@ export const DEFAULT_TTL_MS = 30_000;
 export const MAX_WHERE = 10;
 export const MAX_IN_VALUES = 30;
 export const MAX_LIMIT = 1000;
+/** A filter's `v`, serialized — it is sealed into the lane grant verbatim. */
+export const MAX_WHERE_VALUE_BYTES = 4096;
+/** A `where[].f` or `orderBy.f` field name — also sealed into the lane grant. */
+export const MAX_FIELD_NAME_BYTES = 256;
 /** Documents one query may scan before it is refused. */
 export const MAX_SCAN = 5000;
 
@@ -204,6 +208,9 @@ export function validateQuerySpec(spec: unknown): QuerySpec {
     if (typeof order !== "object" || typeof order.f !== "string" || order.f.length === 0) {
       INVALID("orderBy needs a field name");
     }
+    if (Buffer.byteLength(order.f as string) > MAX_FIELD_NAME_BYTES) {
+      INVALID(`orderBy field name is larger than ${MAX_FIELD_NAME_BYTES} bytes`);
+    }
     const dir = order.dir === undefined ? "asc" : order.dir;
     if (dir !== "asc" && dir !== "desc") INVALID('orderBy direction must be "asc" or "desc"');
     out.orderBy = { f: order.f as string, dir: dir as "asc" | "desc" };
@@ -223,6 +230,9 @@ function validateWhere(clause: unknown): WhereClause {
   if (typeof clause !== "object" || clause === null) INVALID("a filter must be an object");
   const raw = clause as { f?: unknown; op?: unknown; v?: unknown };
   if (typeof raw.f !== "string" || raw.f.length === 0) INVALID("a filter needs a field name");
+  if (Buffer.byteLength(raw.f as string) > MAX_FIELD_NAME_BYTES) {
+    INVALID(`a filter field name is larger than ${MAX_FIELD_NAME_BYTES} bytes`);
+  }
   if (typeof raw.op !== "string" || !(QUERY_OPERATORS as readonly string[]).includes(raw.op)) {
     INVALID(`a filter operator must be one of ${QUERY_OPERATORS.join(", ")}`);
   }
@@ -232,6 +242,14 @@ function validateWhere(clause: unknown): WhereClause {
     if ((raw.v as unknown[]).length > MAX_IN_VALUES) {
       INVALID(`the ${op} operator takes at most ${MAX_IN_VALUES} values`);
     }
+  }
+  // `raw.v` only ever reaches here as `JSON.parse` output (or `undefined`,
+  // for an unset field), so it can never be circular or hold a BigInt:
+  // `JSON.stringify` cannot throw on it. `?? ""` covers the `undefined` case,
+  // where `stringify` itself returns `undefined` rather than a string.
+  const serializedValue = JSON.stringify(raw.v) ?? "";
+  if (Buffer.byteLength(serializedValue) > MAX_WHERE_VALUE_BYTES) {
+    INVALID(`a filter value is larger than ${MAX_WHERE_VALUE_BYTES} bytes`);
   }
   return { f: raw.f as string, op, v: raw.v };
 }

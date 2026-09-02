@@ -25,6 +25,7 @@ import {
 } from "./identity.ts";
 import { isArtifactId, isUserId } from "../../protocol/paths.ts";
 import { VIEWER_COOKIE } from "../../server/auth.ts";
+import { DEFAULT_FRAME_BODY_LIMIT, maxBodySize } from "../../server/body-limit.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import type { ArtifactMeta } from "../../server/store.ts";
 import { UserStore, type StoredProfile } from "./store.ts";
@@ -111,6 +112,11 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
   const store = new UserStore(ctx.config.dataDir);
   const nameLimit = new RateLimiter(NAME_WRITES_PER_WINDOW);
   const joinLimit = new RateLimiter(JOIN_WRITES_PER_WINDOW);
+
+  // Every body here is a name, an id list or a search string: none of it
+  // legitimately approaches this cap, so a request past it is refused
+  // before `c.req.json()` buffers it.
+  apps.shell.use("/api/frame/user/*", maxBodySize(DEFAULT_FRAME_BODY_LIMIT));
 
   const fail = (c: Context, status: 400 | 403 | 404 | 429, code: string, message: string) =>
     c.json({ code, message }, status);

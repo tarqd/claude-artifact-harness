@@ -339,6 +339,16 @@ describe("the write gate", () => {
   });
 });
 
+describe("body size limit", () => {
+  it("refuses a profile write over the cap before it is parsed", async () => {
+    const oversized = await new Client().post("/api/frame/user/profile", {
+      name: "x".repeat(600 * 1024),
+    });
+    expect(oversized.status).toBe(413);
+    expect(oversized.body.code).toBe("too_large");
+  });
+});
+
 describe("RateLimiter", () => {
   it("allows a burst up to the limit and refuses the rest of the window", () => {
     const limiter = new RateLimiter(3, 1000);

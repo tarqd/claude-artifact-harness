@@ -324,6 +324,43 @@ describe("POST /api/frame/sample/call", () => {
     expect((await response.json()) as { code: string }).toMatchObject({ code: "too_large" });
   });
 
+  it("refuses a chunked, multi-byte body over the cap in bytes though under it in chars", async () => {
+    // Each "€" is one UTF-16 code unit (what a naive `string.length` check
+    // counts) but three UTF-8 bytes on the wire. 2.7M of them is well under
+    // the 8,000,000-char mark yet over 8,000,000 bytes: a body that would
+    // slip past a chars-not-bytes check, and one with no `content-length`
+    // (chunked) to pre-check at all.
+    const jsonBytes = new TextEncoder().encode(
+      JSON.stringify({
+        callId: nextCallId(),
+        artifactId,
+        input: "hi",
+        pad: "€".repeat(2_700_001),
+      }),
+    );
+    let offset = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= jsonBytes.length) {
+          controller.close();
+          return;
+        }
+        const end = Math.min(offset + 64 * 1024, jsonBytes.length);
+        controller.enqueue(jsonBytes.subarray(offset, end));
+        offset = end;
+      },
+    });
+    const response = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body,
+      // @ts-expect-error -- Node's fetch needs this for a streaming body
+      duplex: "half",
+    });
+    expect(response.status).toBe(413);
+    expect((await response.json()) as { code: string }).toMatchObject({ code: "too_large" });
+  });
+
   it("refuses a view-only viewer", async () => {
     const response = await fetch(`${readOnly.shellOrigin}/api/frame/sample/call`, {
       method: "POST",

@@ -278,6 +278,15 @@ describe("list", () => {
     const listed = await stranger.post(`/api/frame/blob/${artifact}/list`, "{}");
     expect(listed.status).toBe(200);
   });
+
+  it("refuses a body over the cap before it is parsed", async () => {
+    const oversized = await owner.post(
+      `/api/frame/blob/${artifact}/list`,
+      JSON.stringify({ after: "x".repeat(600 * 1024) }),
+    );
+    expect(oversized.status).toBe(413);
+    expect(oversized.body.code).toBe("too_large");
+  });
 });
 
 describe("the frame origin", () => {
@@ -450,5 +459,15 @@ describe("delete", () => {
     expect(refused.status).toBe(403);
     expect((await fetch(blobUrlFor(artifact, record.id))).status).toBe(200);
     await owner.post(`/api/frame/blob/${artifact}/${record.id}/delete`);
+  });
+
+  it("refuses a body over the cap before it is parsed", async () => {
+    const oversized = await owner.post(
+      `/api/frame/blob/${artifact}/not-an-id/delete`,
+      "x".repeat(600 * 1024),
+      "text/plain",
+    );
+    expect(oversized.status).toBe(413);
+    expect(oversized.body.code).toBe("too_large");
   });
 });

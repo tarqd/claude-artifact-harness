@@ -4,6 +4,7 @@
  */
 import { toCapError } from "../../protocol/errors.ts";
 import { isArtifactId } from "../../protocol/paths.ts";
+import { maxBodySize, PUBLISH_BODY_LIMIT } from "../../server/body-limit.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import type { PublishInput } from "../../server/store.ts";
 
@@ -35,6 +36,13 @@ function decodeFiles(input: unknown): PublishInput["files"] {
 }
 
 export function routes(apps: ServerApps, ctx: ServerContext): void {
+  // Sized off the *encoded* wire form, not the store's decoded ceiling: a
+  // files publish carries content base64 (4/3 blowup) plus a JSON envelope,
+  // so a version at the store's 16 MiB budget needs well over 16 MiB on the
+  // wire. Refused before `c.req.json()` buffers a body that could never
+  // publish anyway.
+  apps.shell.use("/api/frame/self/*", maxBodySize(PUBLISH_BODY_LIMIT));
+
   apps.shell.post("/api/frame/self/:id", async (c) => {
     const id = c.req.param("id");
     if (!isArtifactId(id)) {
