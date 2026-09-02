@@ -22,7 +22,14 @@ const OWNER_TOKEN = "assets-server-owner-token";
 const HTML = "<!doctype html><html><head><title>assets</title></head><body>hi</body></html>";
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
 
-/** One browser: it keeps its viewer cookie, so two clients are two viewers. */
+/**
+ * One browser: it keeps its viewer cookie, so two clients are two viewers —
+ * and it sends the `Origin`/`Sec-Fetch-Site` a browser sends on a same-origin
+ * write, which is what `server/guards.ts` requires of anything carrying a
+ * cookie. (Without them a `text/plain` upload is refused 415: a request that
+ * says nothing about where it came from may not use a content type a forged
+ * cross-site form could have sent.)
+ */
 class Client {
   cookie = "";
 
@@ -38,7 +45,8 @@ class Client {
   }
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
-    return this.cookie ? { ...extra, cookie: this.cookie } : extra;
+    const browser = { ...extra, origin: server.shellOrigin, "sec-fetch-site": "same-origin" };
+    return this.cookie ? { ...browser, cookie: this.cookie } : browser;
   }
 
   async login(): Promise<void> {

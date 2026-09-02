@@ -14,6 +14,13 @@ export interface ServerConfig {
   shellHost: string;
   /** Suffix appended to the artifact id for the frame origin. */
   frameHostSuffix: string;
+  /**
+   * Extra hostnames the two apps answer to, beyond `shellHost` and
+   * `<artifactId>.<frameHostSuffix>` (loopback literals are always accepted).
+   * A request carrying any other `Host` is refused, so a rebound name cannot
+   * become a same-origin client of the shell (`server/guards.ts`).
+   */
+  allowedHosts: string[];
   dataDir: string;
   distDir: string;
   /**
@@ -59,6 +66,14 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** `a.example, b.example` → `["a.example", "b.example"]`; empty when unset. */
+function hostListEnv(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry !== "");
+}
+
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
   const level = process.env.ARTIFACT_DEFAULT_LEVEL;
   const config: ServerConfig = {
@@ -66,6 +81,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     framePort: intEnv("FRAME_PORT", 8788),
     shellHost: process.env.SHELL_HOST ?? "localhost",
     frameHostSuffix: process.env.FRAME_HOST_SUFFIX ?? "localhost",
+    allowedHosts: hostListEnv("ARTIFACT_ALLOWED_HOSTS"),
     dataDir: resolve(process.env.DATA_DIR ?? "./data"),
     distDir: resolve(process.env.DIST_DIR ?? "./dist"),
     runtimeDir: process.env.RUNTIME_DIR ? resolve(process.env.RUNTIME_DIR) : null,

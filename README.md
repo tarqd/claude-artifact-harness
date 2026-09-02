@@ -115,6 +115,26 @@ off unless `ARTIFACT_PREFIX_HOSTS=1` asks for it: artifacts opened that way
 all share one browser origin, which is the isolation the per-artifact host
 exists to give them.
 
+### Which requests each origin accepts
+
+Binding to `127.0.0.1` is not an authorisation check: a page that rebinds its
+own name to loopback is same-origin with the shell as far as the browser is
+concerned. So both apps refuse — before any route runs
+(`src/server/guards.ts`) — a request whose `Host` is not one of theirs:
+`SHELL_HOST` for the shell, `<artifactId>.<FRAME_HOST_SUFFIX>` (or the bare
+suffix, which is where the `/_a/<artifactId>/…` form is reached) for the
+frame origin, plus loopback literals and anything in
+`ARTIFACT_ALLOWED_HOSTS`. Anything else is `403 unknown host`.
+
+Every non-GET request on the shell origin must also come from the shell page
+itself: `Sec-Fetch-Site` must be `same-origin` or `none`, and an `Origin`, if
+sent, must be this origin. That is what stops an artifact frame from writing
+the shell API with the viewer's cookie where a deployment puts both under one
+registrable domain. A client that sends neither header — `npm run publish`,
+`curl`, a test — is still served, but its content type must be one a browser
+could not have sent cross-site without a preflight: `application/json` and
+the `assets` media types pass, `text/plain` and the form encodings do not.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -123,6 +143,7 @@ exists to give them.
 | `FRAME_PORT` | `8788` | frame origin port |
 | `SHELL_HOST` | `localhost` | hostname the shell is reached at |
 | `FRAME_HOST_SUFFIX` | `localhost` | suffix after `<artifactId>.` for the frame origin |
+| `ARTIFACT_ALLOWED_HOSTS` | unset | extra hostnames, comma-separated, the two apps answer to beyond the two above — a proxy's internal name, a LAN address. Loopback literals are always accepted |
 | `DATA_DIR` | `./data` | filesystem store root |
 | `DIST_DIR` | `./dist` | where the built client bundles are read from |
 | `ARTIFACT_SECRET` | random per boot | HMAC secret for the viewer cookie and asset tokens |

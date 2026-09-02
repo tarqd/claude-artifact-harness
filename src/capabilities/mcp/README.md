@@ -157,7 +157,11 @@ under `mcp`, frozen.
 routes accept only the shell page's own requests (`application/json`, and
 neither a `Sec-Fetch-Site` nor an `Origin` naming another site — a
 cross-site "simple" POST would otherwise run a tool with no dialog, cookie
-or not), require the artifact to declare `mcp` and the viewer to be able
+or not). The spine now runs the same check on every write
+(`src/server/guards.ts`); `sameOriginOnly` stays because a lane that spends
+the operator's connector credentials states its own precondition, and
+because it refuses a non-JSON body a route parsing JSON has no use for.
+Both routes require the artifact to declare `mcp` and the viewer to be able
 to interact (`view` → `not_granted`), and meter the body against a 512 KiB
 cap as it streams. `/servers` answers the manifest intersected with the
 directory: a server the directory does not know or a `host:` one is

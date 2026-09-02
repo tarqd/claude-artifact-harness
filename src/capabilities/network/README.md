@@ -5,7 +5,7 @@ The fetch allowlist, in two halves that never talk to each other:
 | half | file | what it does |
 |---|---|---|
 | page-facing | `frame.ts` | `origins(): Promise<string[]>` — echoes `capabilities.network.config.origins` from `__frame_init` |
-| enforcement | `server.ts` | `connectSrcOrigins(meta.capabilities)` — the declaration → the CSP `connect-src` sources |
+| enforcement | `server.ts` | `connectSrcOrigins(meta.capabilities, self)` — the declaration → the CSP `connect-src` sources |
 
 There is no wire traffic and no backend: surface-area.md §11 lists "claude.ai
 reference endpoints: none" for this capability, so `broker.ts` exists only to
@@ -36,6 +36,19 @@ a plain host (no wildcard, no IPv6 literal). Survivors are re-emitted from
 `MAX_ORIGINS` (32). This is what stops `"https://a.example; script-src *"`
 from becoming a second CSP directive of the author's choosing.
 
+The harness's own hosts are dropped too. `isSelfHost` takes the `SelfHosts`
+the caller passes (`ctx.config` — `SHELL_HOST` and `FRAME_HOST_SUFFIX`) and
+refuses the shell's host, the frame suffix and every `<artifactId>.<suffix>`
+under it. An artifact declaring `["https://shell.example.com"]` is not asking
+for a third-party API: it is asking to `fetch` the surface that grants it its
+capabilities, and where a deployment puts shell and frames under one
+registrable domain the viewer's `SameSite=Lax` cookie rides along. The server
+refuses that request anyway (`src/server/guards.ts` checks `Origin` on every
+write); dropping the origin here means the browser never makes it. Out of the
+box `SHELL_HOST` and `FRAME_HOST_SUFFIX` are both `localhost`, so nothing on
+`localhost` can be declared — which costs a page nothing, since the validator
+already refuses every non-`https:` origin.
+
 ## What deviates from the platform, and why
 
 1. **`origins()` echoes the declaration; the CSP carries the validated
@@ -60,6 +73,12 @@ from becoming a second CSP directive of the author's choosing.
 4. **IPv6 literal origins (`https://[::1]`) are dropped.** They are valid CSP
    sources; the regexp is deliberately narrow. Widen `ORIGIN_RE` if a
    self-host needs one.
+5. **The harness's own hosts are dropped from `connect-src`.** claude.ai has
+   no documented rule here; this one follows from the topology (§10.1's
+   `connect-src` is the artifact's reach outward, and the shell is not
+   outward). `origins()` still echoes the declaration, as it does for every
+   other refused entry, so the divergence is visible to the page exactly the
+   way the others are.
 
 ## Spine changes requested
 
@@ -67,7 +86,7 @@ None outstanding. The one this slice needed landed in the integration pass:
 `src/server/serve.ts` now builds the frame origin's CSP with
 
 ```ts
-c.header("content-security-policy", frameCsp(ctx.shellOrigin, connectSrcOrigins(meta?.capabilities)));
+c.header("content-security-policy", frameCsp(ctx.shellOrigin, connectSrcOrigins(meta?.capabilities, ctx.config)));
 ```
 
 so the policy the browser enforces is the validated subset, not the raw
@@ -106,6 +125,9 @@ npx playwright test e2e/network.spec.ts
   `frame-ancestors *` refused, the cap holding at `MAX_ORIGINS`, an
   `optional` declaration opening nothing, another route's own policy left
   alone, and every other directive left byte-for-byte as the spine built it.
+  `isSelfHost` and the self-origin drop have their own cases there: the shell
+  host, the bare frame suffix, a sibling `<artifactId>.<suffix>`, and the
+  hosts that only look like ours (`notframes.test`) which are kept.
 - `e2e/network.spec.ts` with `fixtures/network.html` — the real shell, server
   and iframe: the namespace shape from inside the frame, the declaration
   echoed, the CSP on the document, and the enforcement itself. The fixture
