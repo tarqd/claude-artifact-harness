@@ -89,6 +89,16 @@ describe("documents", () => {
     await store.set(ARTIFACT, "tasks/t4", { a: 1 });
     expect(seen).toEqual(["tasks/t3", "tasks/t3"]);
   });
+
+  it("leaves the index untouched when a write fails to persist", async () => {
+    // Two 200-byte segments encode to a filename past NAME_MAX (255 bytes
+    // on ext4/most Linux filesystems), so the write below rejects.
+    const path = `${"x".repeat(200)}/${"x".repeat(200)}`;
+    const before = await store.count(ARTIFACT);
+    await expect(store.set(ARTIFACT, path, { v: 1 })).rejects.toThrow();
+    expect(await store.read(ARTIFACT, path)).toBeNull();
+    expect(await store.count(ARTIFACT)).toBe(before);
+  });
 });
 
 describe("bodies", () => {

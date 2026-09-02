@@ -100,14 +100,28 @@ export function mimeFor(extension: string): string {
 /* ------------------------------- the filename ----------------------------- */
 
 /**
+ * Unicode format characters (bidi overrides, zero-width marks, BOM, ...) --
+ * `\p{Cf}`, the same category the room slice's explicit table covers
+ * (room/validate.ts `INVISIBLE_RANGES`). Left in, they let a name that
+ * *renders* as one extension resolve to another (`report<RLO>gnp.html`
+ * displays "reportlmth.png") or hide characters entirely -- deceptive
+ * either way for a dialog the viewer is meant to read and confirm.
+ */
+const FORMAT_CHARS_RE = /\p{Cf}/gu;
+
+/**
  * Reduce whatever the page passed to a bare, boring basename. Directory
- * separators go first (a save is never a path), then control characters and
- * the characters no common file system accepts, then leading dots — a save is
+ * separators go first (a save is never a path), then Unicode format
+ * characters (after NFC-normalising, so the extension check below sees the
+ * name the way it will actually render), then control characters and the
+ * characters no common file system accepts, then leading dots -- a save is
  * not a way to write a hidden file, and `".csv"` is an extension with no name.
  */
 export function sanitizeFilename(raw: string): string {
   const base = raw.split(/[\\/]/).pop() ?? "";
   return base
+    .normalize("NFC")
+    .replace(FORMAT_CHARS_RE, "")
     .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, "")
     .replace(/\s+/g, " ")
     .trim()

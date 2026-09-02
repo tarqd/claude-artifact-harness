@@ -5,7 +5,7 @@
  * every outcome into exactly one `__frame_cap_r`.
  */
 import { resolveCapability } from "../protocol/capabilities.ts";
-import { CAPABILITY_DISABLED, toCapError, type CapError } from "../protocol/errors.ts";
+import { CAPABILITY_DISABLED, capError, isCapError, type CapError } from "../protocol/errors.ts";
 import { isFrameCapCall } from "../protocol/messages.ts";
 import { BROKERS } from "./registry.ts";
 import type { BrokerCall, BrokerContext } from "./types.ts";
@@ -50,7 +50,20 @@ export async function dispatch(call: BrokerCall, ctx: BrokerContext): Promise<Br
     const result = await broker.handle(call, ctx);
     return { __frame_cap_r: true, id: call.id, result };
   } catch (err) {
-    return { __frame_cap_r: true, id: call.id, error: toCapError(err) };
+    // A slice's own `capError` is meant for the page and crosses verbatim.
+    // Anything else — a raw `fetch`/JSON error, a Node filesystem error
+    // (which can embed an absolute server path), a programming bug — is
+    // shell-only detail: log it here and tell the frame nothing but a fixed,
+    // opaque message.
+    if (isCapError(err)) {
+      return { __frame_cap_r: true, id: call.id, error: err };
+    }
+    console.error(`broker dispatch for "${call.cap}.${call.method}" threw`, err);
+    return {
+      __frame_cap_r: true,
+      id: call.id,
+      error: capError("upstream_error", "internal error"),
+    };
   }
 }
 

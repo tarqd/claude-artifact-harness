@@ -213,6 +213,74 @@ describe("POST /api/frame/sample/call", () => {
     await iterator.return(undefined);
   });
 
+  it("lets two viewers park the same callId without colliding", async () => {
+    // A client-chosen callId is not unique across viewers. Before the fix,
+    // the waiters map was keyed by callId alone: once viewer A had a call
+    // parked under it, viewer B reusing the same id was refused outright
+    // (and, had B been let through, whichever of them parked second would
+    // have clobbered the other's waiter in the map).
+    const page = await fetch(`${server.shellOrigin}/a/${artifactId}`);
+    const cookieB = (page.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+    expect(cookieB).toMatch(/^av=/);
+    expect(cookieB).not.toBe(cookie);
+
+    const collideId = nextCallId();
+
+    const respA = await callSample({
+      callId: collideId,
+      input: "use the tool",
+      tools: [{ name: "t", description: "d" }],
+    });
+    expect(respA.status).toBe(200);
+    const itA = events(respA);
+    let evA = await itA.next();
+    while (!evA.done && evA.value.type !== "tool_use") evA = await itA.next();
+    const toolIdA = evA.done ? "" : (evA.value as Extract<SampleEvent, { type: "tool_use" }>).calls[0]?.id ?? "";
+    expect(toolIdA).not.toBe("");
+
+    // Viewer B reuses the same callId while A is still parked on it.
+    const respB = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieB },
+      body: JSON.stringify({
+        artifactId,
+        callId: collideId,
+        input: "use the tool",
+        tools: [{ name: "t", description: "d" }],
+      }),
+    });
+    expect(respB.status).toBe(200);
+    const itB = events(respB);
+    let evB = await itB.next();
+    while (!evB.done && evB.value.type !== "tool_use") evB = await itB.next();
+    const toolIdB = evB.done ? "" : (evB.value as Extract<SampleEvent, { type: "tool_use" }>).calls[0]?.id ?? "";
+    expect(toolIdB).not.toBe("");
+
+    // Answer B first: it must not resolve (or remove) A's still-parked waiter.
+    const replyB = await fetch(`${server.shellOrigin}/api/frame/sample/tool_results`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieB },
+      body: JSON.stringify({ callId: collideId, results: [{ id: toolIdB, content: "from-B" }] }),
+    });
+    expect(replyB.status).toBe(200);
+    const replyA = await fetch(`${server.shellOrigin}/api/frame/sample/tool_results`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ callId: collideId, results: [{ id: toolIdA, content: "from-A" }] }),
+    });
+    expect(replyA.status).toBe(200);
+
+    const restA: SampleEvent[] = [evA.value as SampleEvent];
+    for (let e = await itA.next(); !e.done; e = await itA.next()) restA.push(e.value);
+    const restB: SampleEvent[] = [evB.value as SampleEvent];
+    for (let e = await itB.next(); !e.done; e = await itB.next()) restB.push(e.value);
+
+    expect(textOf(restA)).toContain("from-A");
+    expect(textOf(restA)).not.toContain("from-B");
+    expect(textOf(restB)).toContain("from-B");
+    expect(textOf(restB)).not.toContain("from-A");
+  });
+
   it("refuses a bad body, an unknown artifact and one that does not declare sample", async () => {
     expect((await callSample({ input: "hi" })).status).toBe(400);
     expect((await callSample({ callId: nextCallId(), input: "" })).status).toBe(400);

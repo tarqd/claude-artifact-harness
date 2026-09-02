@@ -5,7 +5,7 @@ The fetch allowlist, in two halves that never talk to each other:
 | half | file | what it does |
 |---|---|---|
 | page-facing | `frame.ts` | `origins(): Promise<string[]>` — echoes `capabilities.network.config.origins` from `__frame_init` |
-| enforcement | `server.ts` | `connectSrcOrigins(meta.capabilities)` — the declaration → the CSP `connect-src` sources |
+| enforcement | `server.ts` | `connectSrcOrigins(meta.capabilities, shellOrigin, frameHostSuffix)` — the declaration → the CSP `connect-src` sources |
 
 There is no wire traffic and no backend: surface-area.md §11 lists "claude.ai
 reference endpoints: none" for this capability, so `broker.ts` exists only to
@@ -34,7 +34,11 @@ absolute `https:` origin with no credentials, no path, query or fragment, and
 a plain host (no wildcard, no IPv6 literal). Survivors are re-emitted from
 `URL.origin` — never passed through — then de-duplicated and capped at
 `MAX_ORIGINS` (32). This is what stops `"https://a.example; script-src *"`
-from becoming a second CSP directive of the author's choosing.
+from becoming a second CSP directive of the author's choosing. A survivor
+whose host is the shell's own host, or a sibling artifact's frame host
+(anything under `frameHostSuffix`), is dropped too: same-site with the
+viewer's cookie, it would let a declared `connect-src` reach `/api/frame/*`
+(or another artifact's frame) from inside this frame.
 
 ## What deviates from the platform, and why
 
@@ -67,7 +71,7 @@ None outstanding. The one this slice needed landed in the integration pass:
 `src/server/serve.ts` now builds the frame origin's CSP with
 
 ```ts
-c.header("content-security-policy", frameCsp(ctx.shellOrigin, connectSrcOrigins(meta?.capabilities)));
+c.header("content-security-policy", frameCsp(ctx.shellOrigin, connectSrcOrigins(meta?.capabilities, ctx.shellOrigin, ctx.config.frameHostSuffix)));
 ```
 
 so the policy the browser enforces is the validated subset, not the raw

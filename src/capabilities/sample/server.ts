@@ -409,11 +409,21 @@ export function selectBackend(): SampleBackend | CapError {
 
 interface ToolWaiter {
   viewerId: string;
+  callId: string;
   resolve(results: WireToolResult[]): void;
 }
 
-/** Calls whose stream is parked on the page's tool results. */
+/**
+ * Calls whose stream is parked on the page's tool results, keyed by
+ * `viewerId:callId` rather than the client-chosen `callId` alone - two
+ * viewers (or a viewer's own retry) can otherwise pick the same id and
+ * clobber each other's parked waiter.
+ */
 const waiters = new Map<string, ToolWaiter>();
+
+function waiterKey(viewerId: string, callId: string): string {
+  return `${viewerId}:${callId}`;
+}
 /** Open streams per viewer, so one caller cannot hold the server open. */
 const streamsPerViewer = new Map<string, number>();
 
@@ -635,7 +645,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       if (utf8Bytes(inputText(input)) > MAX_PROMPT_BYTES) {
         refuse(400, "prompt_too_large", "the prompt exceeds the 64 KiB limit");
       }
-      if (waiters.has(body.callId)) {
+      if (waiters.has(waiterKey(viewer.id, body.callId))) {
         refuse(409, "invalid_request", "duplicate call id");
       }
 
@@ -689,25 +699,26 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
             return;
           }
           emit({ type: "tool_use", calls });
+          const key = waiterKey(viewerId, callId);
           const timer = setTimeout(() => {
-            waiters.delete(callId);
+            waiters.delete(key);
             reject(capError("upstream_error", "the page never returned its tool results"));
           }, TOOL_RESULTS_TIMEOUT_MS);
           const finish = (results: WireToolResult[]): void => {
             clearTimeout(timer);
-            waiters.delete(callId);
+            waiters.delete(key);
             resolve(results);
           };
           controller.signal.addEventListener(
             "abort",
             () => {
               clearTimeout(timer);
-              waiters.delete(callId);
+              waiters.delete(key);
               resolve(calls.map((call) => ({ id: call.id, content: "Error: the call ended", isError: true })));
             },
             { once: true },
           );
-          waiters.set(callId, { viewerId, resolve: finish });
+          waiters.set(key, { viewerId, callId, resolve: finish });
         });
 
       try {
@@ -729,7 +740,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
           emit({ type: "error", code: error.code, message: error.message });
         }
       } finally {
-        waiters.delete(callId);
+        waiters.delete(waiterKey(viewerId, callId));
         releaseStream(viewerId);
       }
       await chain;
@@ -744,13 +755,18 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
     if (!body || typeof body.callId !== "string" || !Array.isArray(body.results)) {
       return c.json({ code: "invalid_request", message: "callId and results are required" }, 400);
     }
-    const waiter = waiters.get(body.callId);
-    // A call nobody is waiting on is over: say so rather than holding bytes.
-    if (!waiter) return c.json({ code: "invalid_request", message: "no such call" }, 404);
     const viewer = ctx.auth.viewer(c);
-    // Only the viewer whose call this is may answer its tools.
-    if (waiter.viewerId !== viewer.id) {
-      return c.json({ code: "not_granted", message: "not your call" }, 403);
+    // Keyed by viewer, so a stranger can never look up someone else's
+    // waiter: ownership is enforced by the lookup itself, not a check after.
+    const waiter = waiters.get(waiterKey(viewer.id, body.callId));
+    if (!waiter) {
+      // Distinguish "no such call" from "not your call" only for the
+      // message; the scoped key above is what actually enforces ownership.
+      const forSomeoneElse = [...waiters.values()].some((w) => w.callId === body.callId);
+      if (forSomeoneElse) {
+        return c.json({ code: "not_granted", message: "not your call" }, 403);
+      }
+      return c.json({ code: "invalid_request", message: "no such call" }, 404);
     }
     const results: WireToolResult[] = [];
     for (const entry of body.results) {
