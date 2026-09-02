@@ -13,6 +13,28 @@ interface EncodedFile {
   content?: unknown;
 }
 
+/**
+ * A bare media type, no parameters: mirrors the frame-side check in
+ * `capabilities/artifact/frame.ts` (`validateFiles`) so both agree on what a
+ * writer may claim, but enforced here too since the frame validator is only
+ * a courtesy to well-behaved pages, not a security boundary. Also rules out
+ * anything `Headers.set` would reject (CR/LF, non-ASCII) before it can ever
+ * reach a response header at serve time.
+ */
+const MEDIA_TYPE_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
+const MAX_CONTENT_TYPE_LENGTH = 128;
+
+function normaliseContentType(path: string, raw: string): string {
+  const contentType = raw.trim().toLowerCase();
+  if (contentType.length > MAX_CONTENT_TYPE_LENGTH || !MEDIA_TYPE_RE.test(contentType)) {
+    throw toCapError({
+      code: "invalid_content",
+      message: `${path}: contentType must be a bare media type such as text/plain, with no parameters`,
+    });
+  }
+  return contentType;
+}
+
 function decodeFiles(input: unknown): PublishInput["files"] {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
   const out: NonNullable<PublishInput["files"]> = {};
@@ -29,7 +51,7 @@ function decodeFiles(input: unknown): PublishInput["files"] {
       file.encoding === "base64"
         ? Buffer.from(file.content, "base64")
         : Buffer.from(file.content, "utf8");
-    out[path] = { content, contentType: file.contentType };
+    out[path] = { content, contentType: normaliseContentType(path, file.contentType) };
   }
   return out;
 }
@@ -61,9 +83,13 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       files?: unknown;
     } | null;
     if (!body) return c.json({ code: "invalid_content", message: "bad request body" }, 400);
-
-    const baseVersion =
-      typeof body.baseVersion === "string" ? body.baseVersion : meta.currentVersion;
+    // The broker always sends the view's own version (compare half of
+    // compare-and-set); a caller that omits it is not a cooperative client,
+    // so it gets no silent fallback to "whatever is live" here.
+    if (typeof body.baseVersion !== "string") {
+      return c.json({ code: "invalid_content", message: "baseVersion is required" }, 400);
+    }
+    const baseVersion = body.baseVersion;
 
     try {
       const input: PublishInput = { baseVersion, actor: viewer.id, requireDoctype: true };

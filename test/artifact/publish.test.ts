@@ -125,6 +125,21 @@ describe("compare-and-set publish", () => {
     expect(await store.readVersionFile(id, "v2", "big.bin")).toBeNull();
   });
 
+  it("normalises a stored contentType sidecar to lowercase on read", async () => {
+    // The capability endpoint normalises going forward, but a sidecar
+    // written before that (or by some other writer) must still compare
+    // correctly against the lowercase document-type check at serve time.
+    await store.publish(id, {
+      baseVersion: "v1",
+      files: {
+        "y.html": { content: Buffer.from("<p>y</p>"), contentType: "TEXT/HTML" },
+      },
+      actor: null,
+    });
+    const file = await store.readVersionFile(id, "v2", "y.html");
+    expect(file?.contentType).toBe("text/html");
+  });
+
   it("refuses a traversal path", async () => {
     await expect(
       store.publish(id, {

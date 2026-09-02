@@ -96,6 +96,9 @@ export function mountAdminApi(app: Hono, ctx: ServerContext): void {
     if (typeof body.html !== "string") {
       return c.json({ code: "invalid_content", message: "html is required" }, 400);
     }
+    // Unlike the frame publish endpoint, omitting baseVersion here is the
+    // documented blind-overwrite form: this API is owner/admin-only already,
+    // so a caller that doesn't track versions may just publish over live.
     const baseVersion =
       typeof body.baseVersion === "string" ? body.baseVersion : meta.currentVersion;
     const viewer = ctx.auth.viewer(c);

@@ -254,6 +254,65 @@ describe("frame origin", () => {
     const blob = await fetch(frameUrl(server, artifact.id, `/_blob/${"a".repeat(32)}`));
     expect(blob.status).toBe(404);
   });
+
+  it("404s a malformed /_f path instead of 500ing", async () => {
+    const artifact = await create(server);
+    const host = { host: `${artifact.id}.localhost:${server.framePort}` };
+    // A truncated percent-escape: decodeURIComponent throws a URIError.
+    expect((await rawGet(server.framePort, "/_f/v1/%E0%A4", host)).status).toBe(404);
+    // A version id outside the version grammar.
+    expect((await rawGet(server.framePort, "/_f/v1!/index.html", host)).status).toBe(404);
+    // An encoded traversal in the version segment.
+    expect(
+      (await rawGet(server.framePort, "/_f/..%2F..%2F/index.html", host)).status,
+    ).toBe(404);
+  });
+
+  it("preserves the query string on the /_f/<ver> -> /_f/<ver>/ redirect", async () => {
+    const artifact = await create(server);
+    // Not a real `__frame_t` (that goes through the asset-token check first,
+    // before this handler even runs) — any query string must survive.
+    const response = await fetch(frameUrl(server, artifact.id, "/_f/v1?foo=bar"), {
+      redirect: "manual",
+    });
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/_f/v1/?foo=bar");
+  });
+
+  it("envelopes TEXT/HTML and application/xhtml+xml but sandboxes everything else", async () => {
+    const artifact = await create(server);
+    const publish = await fetch(`${server.shellOrigin}/api/frame/self/${artifact.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseVersion: "v1",
+        files: {
+          "y.html": { content: "<p>y</p>", contentType: "TEXT/HTML" },
+          "p.xhtml": { content: "<p>p</p>", contentType: "application/xhtml+xml" },
+          "a.svg": { content: "<svg onload=\"alert(1)\"></svg>", contentType: "image/svg+xml" },
+        },
+      }),
+    });
+    expect(publish.status).toBe(200);
+    const { version } = (await publish.json()) as { version: string };
+
+    const html = await fetch(frameUrl(server, artifact.id, `/_f/${version}/y.html`));
+    expect(html.status).toBe(200);
+    expect(html.headers.get("content-security-policy")).toContain("frame-ancestors");
+    expect(await html.text()).toContain("window.__FRAME_PREAMBLE=");
+
+    const xhtml = await fetch(frameUrl(server, artifact.id, `/_f/${version}/p.xhtml`));
+    expect(await xhtml.text()).toContain("window.__FRAME_PREAMBLE=");
+
+    const svg = await fetch(frameUrl(server, artifact.id, `/_f/${version}/a.svg`));
+    expect(svg.status).toBe(200);
+    // No preamble runs for a non-document type, so it gets an unconditional
+    // sandbox instead of the frame's normal (script-permitting) CSP.
+    expect(svg.headers.get("content-security-policy")).toBe("sandbox");
+    const svgBody = await svg.text();
+    expect(svgBody).not.toContain("__FRAME_PREAMBLE");
+    expect(svgBody).toContain("onload");
+  });
 });
 
 describe("publish endpoint (the artifact broker's backend)", () => {
@@ -323,5 +382,44 @@ describe("publish endpoint (the artifact broker's backend)", () => {
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ code: "invalid_content" });
+  });
+
+  it("requires baseVersion: omitting it does not silently pass compare-and-set", async () => {
+    const artifact = await create(server);
+    const response = await fetch(`${server.shellOrigin}/api/frame/self/${artifact.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ html: "<!doctype html><html><body>no base</body></html>" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "invalid_content" });
+    // Nothing was published: the artifact is still on v1.
+    const live = await fetch(`${server.shellOrigin}/api/artifacts/${artifact.id}/version`);
+    expect(await live.json()).toMatchObject({ version: "v1" });
+  });
+
+  it("refuses a files contentType with CR/LF or parameters, before it can ever 500 a later GET", async () => {
+    const artifact = await create(server);
+    const crlf = await fetch(`${server.shellOrigin}/api/frame/self/${artifact.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseVersion: "v1",
+        files: { "x.txt": { content: "x", contentType: "text/plain\r\nx-evil: 1" } },
+      }),
+    });
+    expect(crlf.status).toBe(400);
+    expect(await crlf.json()).toMatchObject({ code: "invalid_content" });
+
+    const withParams = await fetch(`${server.shellOrigin}/api/frame/self/${artifact.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseVersion: "v1",
+        files: { "x.txt": { content: "x", contentType: "text/plain;charset=utf-8" } },
+      }),
+    });
+    expect(withParams.status).toBe(400);
+    expect(await withParams.json()).toMatchObject({ code: "invalid_content" });
   });
 });

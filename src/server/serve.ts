@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { connectSrcOrigins } from "../capabilities/network/server.ts";
 import { runtimeModuleMap } from "../protocol/capabilities.ts";
-import { isArtifactId } from "../protocol/paths.ts";
+import { isArtifactId, isVersionId } from "../protocol/paths.ts";
 import type { FramePreambleConfig } from "../protocol/messages.ts";
 import type { ShellBoot } from "../shell/types.ts";
 import { mountAdminApi } from "./admin.ts";
@@ -24,6 +24,13 @@ img{max-width:100%}
 
 const DOCTYPE_RE = /^\s*<!doctype html/i;
 const LEADING_DOCTYPE_RE = /^\s*<!doctype html[^>]*>/i;
+
+/**
+ * Stored types that receive the envelope (and so the preamble's RTC
+ * lockdown): both are documents a browser executes script in when navigated
+ * to directly. Everything else is served inert (issue #15).
+ */
+const DOCUMENT_CONTENT_TYPES = new Set(["text/html", "application/xhtml+xml"]);
 
 /**
  * Elements whose content is text and not markup. A `<head` inside one of
@@ -358,22 +365,36 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
   // routes). No placeholder here: Hono ends the chain at the first handler
   // that returns a response, so one registered before the slice would hide it.
 
-  app.get("/_f/:ver", (c) => c.redirect(`${c.req.path}/`));
+  app.get("/_f/:ver", (c) => {
+    // Preserve the query string: `__frame_t` lives there, and dropping it on
+    // the trailing-slash redirect would silently anonymise the viewer.
+    const search = new URL(c.req.url).search;
+    return c.redirect(`${c.req.path}/${search}`);
+  });
 
   app.get("/_f/:ver/*", async (c) => {
     const id = artifactIdFrom(c.req.header("host"), c.req.header("x-artifact-id"));
     if (!id) return c.text("no artifact for this host", 404);
+
+    const version = c.req.param("ver");
+    if (!isVersionId(version)) return c.text("not found", 404);
     const meta = await ctx.store.readMeta(id);
     if (!meta) return c.text("not found", 404);
 
-    const version = c.req.param("ver");
     const prefix = `/_f/${version}/`;
     const rest = c.req.path.startsWith(prefix) ? c.req.path.slice(prefix.length) : "";
-    const relative = decodeURIComponent(rest) || "index.html";
+    let relative: string;
+    try {
+      relative = decodeURIComponent(rest) || "index.html";
+    } catch {
+      // A malformed percent-escape (e.g. a truncated UTF-8 sequence): no
+      // valid path decodes to this, so it can only ever be a 404.
+      return c.text("not found", 404);
+    }
     const file = await ctx.store.readVersionFile(id, version, relative);
     if (!file) return c.text("not found", 404);
 
-    if (file.contentType.startsWith("text/html")) {
+    if (DOCUMENT_CONTENT_TYPES.has(file.contentType.toLowerCase())) {
       let preambleSource: string | null;
       let preambleConfig: FramePreambleConfig;
       const external = ctx.config.runtimeDir;
@@ -403,6 +424,16 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
         "cache-control": "no-store",
       });
     }
-    return c.body(new Uint8Array(file.body), 200, { "content-type": file.contentType });
+    // Every other stored type is served, not enveloped: no preamble runs, so
+    // there is no RTC lockdown and no __FRAME_PREAMBLE to gate script. A
+    // writer-chosen type (SVG, XML, or an outright lie about a document)
+    // must not be able to execute script if a viewer is navigated to it
+    // directly, so it gets an unconditional sandbox in place of the frame's
+    // normal CSP (subresource loads — scripts, images, fetches from within
+    // the enveloped page — are unaffected by this header on their own response).
+    return c.body(new Uint8Array(file.body), 200, {
+      "content-type": file.contentType,
+      "content-security-policy": "sandbox",
+    });
   });
 }

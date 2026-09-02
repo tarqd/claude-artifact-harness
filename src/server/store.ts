@@ -241,7 +241,13 @@ export class Store {
       if (!info.isFile()) return null;
       const body = await readFile(target);
       const sidecar = await readFile(`${target}.type`, "utf8").catch(() => null);
-      const contentType = sidecar?.trim() || contentTypeForPath(path) || "application/octet-stream";
+      // Lowercased even for a sidecar written before this normalisation
+      // landed, so the serve path's document check stays a plain-string test.
+      const contentType = (
+        sidecar?.trim() ||
+        contentTypeForPath(path) ||
+        "application/octet-stream"
+      ).toLowerCase();
       return { body, contentType };
     } catch {
       return null;
