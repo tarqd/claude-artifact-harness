@@ -10,6 +10,14 @@
  * (`read: "view"`, `write: "interact"`) and the platform's private
  * `data/users/{self}`. `{db: {}}` therefore restores exactly the defaults.
  *
+ * A declaration that does not compile is never run and never falls back to
+ * those defaults: the view closes to `owner`/`owner` (see `closed()`), and
+ * the caller reports the errors. `POST /api/artifacts` refuses such a
+ * declaration outright, so an author sees the typo at publish. "Does not
+ * compile" includes a `rules` that is present but is not a list of rules,
+ * and a config bag whose only keys are ones nothing here knows (`rulez`) —
+ * only a bare absence means "I asked for the defaults".
+ *
  * Pure module: no I/O, so the server and the tests share one implementation.
  */
 import {
@@ -58,7 +66,7 @@ export interface CompiledRule {
 
 export interface CompiledRules {
   rules: CompiledRule[];
-  /** Why a declaration was refused. A non-empty list means the defaults ran. */
+  /** Why a declaration was refused. A non-empty list means the closed rules ran. */
   errors: string[];
 }
 
@@ -76,19 +84,49 @@ function defaults(): CompiledRule[] {
   ];
 }
 
-/** The rules a view runs under, or the defaults when the declaration is bad. */
+/**
+ * What a declaration that could not be compiled runs under: nothing below
+ * `owner` reads or writes anything. The defaults are NOT the safe answer
+ * here — root `write: "interact"` is what `{db: {}}` asks for, not what a
+ * typo in one rule of a locked-down declaration asks for, and falling back
+ * to them turns a mistake into an open database.
+ *
+ * Every `{self}` prefix the author DID get past the compiler is carried in
+ * with no levels of its own, alongside the platform's `data/users/{self}`.
+ * The level gate alone would already lock out everyone below `owner`, but
+ * `{self}` privacy is the one gate the owner does not pass either, and an
+ * author who wrote `votes/{self}` promised each viewer that subtree —
+ * dropping the rule while the view is closed would hand the owner every
+ * viewer's private documents. A closure never widens anything.
+ */
+function closed(selfRules: readonly CompiledRule[] = []): CompiledRule[] {
+  const rules: CompiledRule[] = [
+    { segs: [], self: false, read: "owner", write: "owner", declared: false },
+  ];
+  for (const rule of selfRules) {
+    if (!rule.self) continue;
+    if (samePath(rule.segs, ["data", "users"])) continue;
+    if (rules.some((r) => r.self && samePath(r.segs, rule.segs))) continue;
+    rules.push({ segs: rule.segs, self: true, read: null, write: null, declared: false });
+  }
+  rules.push({ segs: ["data", "users"], self: true, read: null, write: null, declared: false });
+  return rules;
+}
+
+/** The rules a view runs under, or the closed rules when the declaration is bad. */
 export function compileRules(config: unknown): CompiledRules {
   const rules = defaults();
   const errors: string[] = [];
 
   const declared = readRuleList(config);
   if (declared === null) return { rules, errors };
-  if (declared.length > MAX_RULES) {
-    return { rules: defaults(), errors: [`at most ${MAX_RULES} rules may be declared`] };
+  if ("error" in declared) return { rules: closed(), errors: [declared.error] };
+  if (declared.rules.length > MAX_RULES) {
+    return { rules: closed(), errors: [`at most ${MAX_RULES} rules may be declared`] };
   }
 
   const added: CompiledRule[] = [];
-  for (const [index, entry] of declared.entries()) {
+  for (const [index, entry] of declared.rules.entries()) {
     const rule = compileRule(entry, index, errors);
     if (rule) added.push(rule);
   }
@@ -113,7 +151,7 @@ export function compileRules(config: unknown): CompiledRules {
     }
   }
 
-  if (errors.length > 0) return { rules: defaults(), errors };
+  if (errors.length > 0) return { rules: closed(added), errors };
 
   for (const rule of added) {
     const existing = rules.findIndex((r) => r.self === rule.self && samePath(r.segs, rule.segs));
@@ -123,11 +161,44 @@ export function compileRules(config: unknown): CompiledRules {
   return { rules, errors };
 }
 
-function readRuleList(config: unknown): unknown[] | null {
-  if (typeof config !== "object" || config === null) return null;
+/**
+ * Config keys this slice and the spine understand. `optional` is valid on
+ * every capability and is read by `buildInitCapabilities`; anything else in
+ * a `db` config bag that declares no `rules` is a misspelling.
+ */
+const CONFIG_KEYS: ReadonlySet<string> = new Set(["rules", "optional"]);
+
+/**
+ * The declared rule list, or `null` when nothing was declared.
+ *
+ * "Absent" and "present but not a list of rules" are NOT the same answer.
+ * A `rules` that arrived double-encoded (a JSON string) or as an object is
+ * a mistake to refuse: reading it as an absence would run the permissive
+ * defaults under a declaration that asked for the opposite, silently.
+ */
+function readRuleList(config: unknown): { rules: unknown[] } | { error: string } | null {
+  if (config === undefined || config === null) return null;
+  if (typeof config !== "object" || Array.isArray(config)) {
+    return { error: "config must be an object" };
+  }
   const rules = (config as { rules?: unknown }).rules;
-  if (!Array.isArray(rules)) return null;
-  return rules;
+  if (rules === undefined) {
+    // No `rules` asks for the defaults - unless the bag carries a key
+    // neither this slice nor the spine knows, in which case it is a
+    // declaration with the key misspelled (`rulez`), and running the
+    // permissive defaults under it is the same silent opening as before.
+    // Only the absence is judged: the bag is shared with the spine, so a
+    // config that DOES carry `rules` may carry spine keys beside it.
+    for (const key of Object.keys(config)) {
+      if (CONFIG_KEYS.has(key)) continue;
+      return {
+        error: `unknown db config key ${JSON.stringify(key.slice(0, 80))}; did you mean "rules"?`,
+      };
+    }
+    return null;
+  }
+  if (!Array.isArray(rules)) return { error: "rules must be an array of rule objects" };
+  return { rules };
 }
 
 function compileRule(entry: unknown, index: number, errors: string[]): CompiledRule | null {
@@ -142,7 +213,10 @@ function compileRule(entry: unknown, index: number, errors: string[]): CompiledR
   }
   const parsed = parseRulePath(raw.path);
   if (!parsed) {
-    errors.push(`rule ${index}: "${raw.path}" is not a rule path`);
+    // The declaration is author-supplied and reaches a console and a 400
+    // body from here, so bound it and let JSON.stringify escape newlines
+    // and control characters rather than echoing the path verbatim.
+    errors.push(`rule ${index}: ${JSON.stringify(raw.path.slice(0, 80))} is not a rule path`);
     return null;
   }
   let read: Level | null = null;
@@ -160,6 +234,16 @@ function compileRule(entry: unknown, index: number, errors: string[]): CompiledR
       return null;
     }
     write = raw.write;
+  }
+  // A rule that sets neither level is a no-op, and a no-op is never what
+  // the author meant: `{path: "", raed: "owner"}` is the same typo class as
+  // a bad path, and reads as a locked-down root that never locked anything.
+  // A `{self}` rule is the exception, and not a no-op: it declares privacy
+  // rather than a level, exactly as the platform's own `data/users/{self}`
+  // does, and dropping it would hand the owner every viewer's subtree.
+  if (read === null && write === null && !parsed.self) {
+    errors.push(`rule ${index}: a rule must set read, write, or both`);
+    return null;
   }
   // "Writing implies reading: a rule's write level is never below its read
   // level" - a declaration that says otherwise is read the sane way.

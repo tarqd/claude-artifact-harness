@@ -9,6 +9,7 @@
 import type { Context, Hono } from "hono";
 import { isCapError, toCapError } from "../protocol/errors.ts";
 import { isArtifactId } from "../protocol/paths.ts";
+import { validateCapabilityDeclaration } from "./routes.ts";
 import type { ServerContext } from "./types.ts";
 
 interface CreateBody {
@@ -41,13 +42,23 @@ export function mountAdminApi(app: Hono, ctx: ServerContext): void {
     if (typeof body.html !== "string") {
       return c.json({ code: "invalid_content", message: "html is required" }, 400);
     }
+    // A slice that cannot run its config closes itself down at request time,
+    // which the author never sees. Refuse the declaration here instead.
+    const capabilities = readCapabilities(body.capabilities);
+    const problems = validateCapabilityDeclaration(capabilities);
+    if (problems.length > 0) {
+      return c.json(
+        { code: "invalid_content", message: `bad capability declaration: ${problems.join("; ")}` },
+        400,
+      );
+    }
     const viewer = ctx.auth.viewer(c);
     try {
       const meta = await ctx.store.createArtifact({
         html: body.html,
         title: typeof body.title === "string" ? body.title : undefined,
         favicon: typeof body.favicon === "string" ? body.favicon : null,
-        capabilities: readCapabilities(body.capabilities),
+        capabilities,
         owner: viewer.id,
       });
       return c.json({

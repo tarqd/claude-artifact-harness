@@ -45,7 +45,7 @@ src/
     store.ts         # filesystem store under data/: artifacts, versions, blobs, db
     auth.ts          # viewer identity cookie (u_<22>), owner token, sharing level
     serve.ts         # /_f/<ver>/..., /_runtime/*.js, /_blob/<id>, shell page
-    routes.ts        # mounts capabilities/<name>/server.ts routes
+    routes.ts        # mounts capabilities/<name>/server.ts routes; validates declarations
   capabilities/
     <name>/
       frame.ts       # export install(ctx): mounts the namespace (page-facing API)
@@ -119,6 +119,7 @@ Admin API on the shell origin for tooling: `POST /api/artifacts` (create from HT
 - The creating viewer is recorded as `meta.owner`, so a dev box without `ARTIFACT_OWNER_TOKEN` still has a real owner per artifact.
 - CSP on the frame origin adds `default-src 'none'`, `form-action 'none'`, `base-uri 'self'` beyond the documented allowlist, so nested iframes and blob workers are blocked until proven needed.
 - `self` is accepted as a declaration name and normalized to `artifact` before `__frame_init`.
+- A slice may export `validateConfig(config): string[]` from its `server.ts`; `POST /api/artifacts` refuses a create whose declaration any slice cannot run (400 `invalid_content`). A slice that closes itself over a broken config would otherwise do so silently, long after publish. `publish` never changes `meta.capabilities`, so it re-validates nothing.
 - Security posture: `canEdit` is owner or admin only; the admin API requires the owner cookie, `Authorization: Bearer <ARTIFACT_OWNER_TOKEN>`, or `ARTIFACT_OPEN_ADMIN=1`; both servers bind `127.0.0.1` unless `BIND_HOST` is set. A forged, expired, or wrong-artifact `__frame_t` is a 403; no token is an anonymous viewer. The resolved viewer is exposed to slice routes as the Hono variable `frameViewer`.
 - RPC id prefixes are owned by `src/protocol/capabilities.ts` (`CAP_ID_PREFIXES`); `createRpc` derives them from the cap name, and `RpcOptions.onTimeout` lets a slice choose its timeout outcome.
 - One `BrokerContext` per mounted view; brokers may export `dispose`.

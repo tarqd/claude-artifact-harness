@@ -104,6 +104,33 @@ lane too, and the refresh timer stops as soon as nothing is subscribed.
   half-declaration there is refused instead of opening every private subtree. A read that is not permitted looks like a missing document
   (`exists: false`, omitted from queries and subscriptions); a write that is
   not permitted rejects `invalid_argument`.
+- A declaration that does not compile is **never** run and never falls back
+  to the defaults — the defaults (root `write: "interact"`) are looser than
+  any declaration worth writing, so one typo used to open the whole store.
+  The view closes instead: root `read: "owner"` / `write: "owner"`, with
+  `data/users/{self}` privacy still in force — and every `{self}` prefix the
+  author did declare carried in level-less alongside it, because `{self}` is
+  the one gate the owner does not pass and a closure may not widen it. Every
+  viewer below the owner reads `exists: false` and writes `invalid_argument`
+  until the declaration is fixed, and the owner can still repair the data.
+  The server logs the compiler's errors once per published version on first
+  touch, because the closure is otherwise invisible from both sides. `POST
+  /api/artifacts` refuses such a declaration outright (400
+  `invalid_content`, naming the rule), so only an artifact created before
+  that check — or written straight to disk — can reach the closed state.
+- "Does not compile" is deliberately wider than a bad rule path. `rules`
+  present but not an array (a double-encoded JSON string, an object) is an
+  error, not an absence, and so is a config bag that declares no `rules` but
+  carries a key nothing here knows — `{rulez: [...]}` is a declaration with
+  the key misspelled, not a request for the defaults. Only a bare absence
+  (`{}`, `{optional: true}`) asks for the defaults; a bag that does carry
+  `rules` may carry spine keys beside it, since the bag is shared. A rule
+  that sets neither `read` nor `write` is refused rather than compiled to a
+  no-op, since `{path: "", raed: "owner"}` reads to its author as a
+  locked-down root — unless the path ends in `{self}`, which declares
+  privacy rather than a level and is how `data/users/{self}` itself is
+  written. The compiler bounds and escapes the path it echoes back, because
+  that message reaches a console and an HTTP response.
 
 ## Deviations from the platform, and why
 
@@ -138,10 +165,15 @@ lane too, and the refresh timer stops as soon as nothing is subscribed.
   `metadata` — and the `DocumentSnapshot` a document subscription delivers —
   is always the current delivery's, re-dressed around the same frozen body so
   `data()` identity survives.
-- **Rule declarations are validated at compile time, not at publish.** The
-  admin API is spine-owned, so a bad `rules` declaration cannot be refused at
-  publish; `compileRules` reports the errors and the view falls back to the
-  defaults (fail closed), rather than running a half-understood declaration.
+- **Rule declarations are validated at publish and again at compile time.**
+  The admin API is spine-owned, so the slice exports `validateConfig` and
+  `src/server/routes.ts` asks every declared slice the same question at
+  `POST /api/artifacts` — a bad `rules` list is a 400 there. `compileRules`
+  still reports the errors at request time (nothing validates the metadata
+  on disk), and a view whose declaration does not compile closes to
+  `owner`/`owner` rather than running a half-understood declaration.
+  `POST /api/artifacts/:id/publish` never touches `meta.capabilities`, so
+  there is nothing for it to re-validate.
 - **Not implemented:** the per-viewer call-rate limit and the
   concurrent-write / active-lease budgets (other `resource_exhausted`
   sources); the query scan cap exists but is unreachable below the 5000

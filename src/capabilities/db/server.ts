@@ -39,6 +39,8 @@ const PUSH_COALESCE_MS = 10;
  * every extra subscription is a full collection scan on every write.
  */
 const MAX_LANE_SUBS = 64;
+/** How many (artifact, version) pairs the warn-once set remembers. */
+const MAX_REPORTED = 256;
 
 export type SubscribeSpec = { path: string } | QuerySpec;
 
@@ -89,6 +91,15 @@ export function dbConfig(meta: ArtifactMeta): unknown {
 }
 
 /**
+ * Why this declaration cannot be run, one message per problem. The spine
+ * calls it at `POST /api/artifacts` so a bad `rules` list is refused at
+ * publish instead of quietly closing the view (`CapabilityServer`).
+ */
+export function validateConfig(config: unknown): string[] {
+  return compileRules(config).errors;
+}
+
+/**
  * `data/users/me/...` names the caller's own subtree, resolved server-side:
  * the segment right after a `{self}` rule prefix may be spelled `me`.
  * Nothing else in the path is rewritten.
@@ -127,6 +138,31 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
 
   /* ------------------------------ identity ----------------------------- */
 
+  /** `<artifact>@<version>` declarations already warned about. */
+  const reported = new Set<string>();
+
+  /**
+   * The rules a view of this artifact runs under. A declaration that does
+   * not compile closes the view to `owner`/`owner`, which is silent from
+   * the page's side — so say so on the server, once per published version,
+   * or the author only sees a store that answers `exists: false`.
+   */
+  function rulesFor(meta: ArtifactMeta): CompiledRule[] {
+    const compiled = compileRules(dbConfig(meta));
+    if (compiled.errors.length === 0) return compiled.rules;
+    const key = `${meta.id}@${meta.currentVersion}`;
+    if (!reported.has(key)) {
+      if (reported.size >= MAX_REPORTED) reported.clear();
+      reported.add(key);
+      console.warn(
+        `db: artifact ${meta.id} declares rules that do not compile, so every path ` +
+          `is closed to everyone but the owner until they are fixed:\n` +
+          compiled.errors.map((message) => `  - ${message}`).join("\n"),
+      );
+    }
+    return compiled.rules;
+  }
+
   async function identify(c: Context, id: string): Promise<ViewIdentity> {
     if (!isArtifactId(id)) throw capError("invalid_argument", "bad artifact id");
     const meta = await ctx.store.readMeta(id);
@@ -139,7 +175,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
     return {
       meta,
       viewer: { id: cookieViewer.id, level },
-      rules: compileRules(dbConfig(meta)).rules,
+      rules: rulesFor(meta),
     };
   }
 
@@ -340,7 +376,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
     return {
       meta,
       viewer: { id: lane.viewerId, level },
-      rules: compileRules(dbConfig(meta)).rules,
+      rules: rulesFor(meta),
     };
   }
 

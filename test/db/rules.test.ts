@@ -105,7 +105,10 @@ describe("{self} under any prefix", () => {
     expect(compileRules(half).errors[0]).toMatch(/must set both read and write/);
     expect(can(half, `data/users/${A}/profile`, "read", viewer(B, "interact"))).toBe(false);
     expect(can(half, `data/users/${A}/profile`, "write", viewer(B, "interact"))).toBe(false);
-    expect(can(half, `data/users/${B}/profile`, "write", viewer(B, "interact"))).toBe(true);
+    // The refusal closes the view, so not even a viewer's own subtree is
+    // writable below `owner` until the declaration is fixed.
+    expect(can(half, `data/users/${B}/profile`, "write", viewer(B, "interact"))).toBe(false);
+    expect(can(half, `data/users/${B}/profile`, "write", viewer(B, "owner"))).toBe(true);
   });
 
   it("opens data/users when the declaration sets both levels", () => {
@@ -124,9 +127,9 @@ describe("{self} under any prefix", () => {
     };
     const compiled = compileRules(half);
     expect(compiled.errors[0]).toMatch(/must set both read and write/);
-    // A refused declaration falls back to the defaults, never to something
-    // looser than what was asked for.
-    expect(can(half, `votes/${A}`, "write", viewer(A, "interact"))).toBe(true);
+    // A refused declaration closes the view, never falls back to the
+    // defaults: the defaults are looser than the declaration asked for.
+    expect(can(half, `votes/${A}`, "write", viewer(A, "interact"))).toBe(false);
     expect(can(half, `data/users/${A}/x`, "read", viewer(B, "interact"))).toBe(false);
   });
 });
@@ -149,5 +152,212 @@ describe("declaration validation", () => {
 
   it("treats {db: {}} as the defaults", () => {
     expect(compileRules({}).rules).toEqual(compileRules({ rules: [] }).rules);
+  });
+});
+
+describe("a declaration that does not compile", () => {
+  // One typo used to discard the whole declaration and run the DEFAULTS, so
+  // a locked-down author ended up with root `write: "interact"` for every
+  // anonymous viewer. A refused declaration is closed, not default.
+  const oneTypo = {
+    rules: [
+      { path: "", read: "view", write: "owner" },
+      { path: "bad path!", read: "view" },
+    ],
+  };
+
+  it("closes every path instead of falling back to the defaults", () => {
+    expect(compileRules(oneTypo).errors[0]).toMatch(/is not a rule path/);
+    expect(can(oneTypo, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(oneTypo, "t/1", "write", viewer(null, "interact"))).toBe(false);
+    expect(can(oneTypo, "t/1", "read", viewer(A, "admin"))).toBe(false);
+    // The owner can still reach the store to repair it.
+    expect(can(oneTypo, "t/1", "read", viewer(A, "owner"))).toBe(true);
+    expect(can(oneTypo, "t/1", "write", viewer(A, "owner"))).toBe(true);
+  });
+
+  it("keeps {self} privacy while closed", () => {
+    expect(can(oneTypo, `data/users/${A}/profile`, "read", viewer(B, "owner"))).toBe(false);
+    expect(can(oneTypo, `data/users/${A}/profile`, "read", viewer(A, "owner"))).toBe(true);
+  });
+
+  it("closes on a rule list over the cap too", () => {
+    const many = { rules: Array.from({ length: 65 }, (_, i) => ({ path: `c${i}`, read: "view" })) };
+    expect(can(many, "t/1", "write", viewer(A, "interact"))).toBe(false);
+  });
+
+  it("leaves a declaration that does compile on exactly what it asked for", () => {
+    const fixed = { rules: [{ path: "", read: "view", write: "owner" }] };
+    expect(compileRules(fixed).errors).toEqual([]);
+    expect(can(fixed, "t/1", "read", viewer(null, "interact"))).toBe(true);
+    expect(can(fixed, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(fixed, "t/1", "write", viewer(A, "owner"))).toBe(true);
+  });
+
+  it("keeps the {self} prefixes the author declared, so the owner stays out", () => {
+    // The level gate alone locks out everyone below `owner`; `{self}` is the
+    // gate the owner does not pass either, and a closure must not hand the
+    // owner subtrees the author promised were private.
+    const broken = {
+      rules: [
+        { path: "", read: "view", write: "owner" },
+        { path: "votes/{self}", write: "interact" },
+        { path: "bad path!", read: "view" },
+      ],
+    };
+    expect(compileRules(broken).errors[0]).toMatch(/is not a rule path/);
+    expect(can(broken, `votes/${B}/x`, "read", viewer(A, "owner"))).toBe(false);
+    expect(can(broken, `votes/${B}/x`, "write", viewer(A, "owner"))).toBe(false);
+    // The viewer's own subtree is still gated on the closed level, so only
+    // the owner reads their own, and nobody below `owner` reads anything.
+    expect(can(broken, `votes/${A}/x`, "read", viewer(A, "owner"))).toBe(true);
+    expect(can(broken, `votes/${A}/x`, "read", viewer(A, "interact"))).toBe(false);
+  });
+});
+
+describe("a rules declaration that is not a list of rules", () => {
+  // The shape double-encoding gives you: `rules` survives as a JSON STRING.
+  // It used to read as "no declaration", so the permissive defaults ran
+  // under a declaration whose whole point was to lock the store down.
+  const encoded = { rules: '[{"path":"","read":"view","write":"owner"}]' };
+
+  it("is an error, not an absence", () => {
+    expect(compileRules(encoded).errors).toEqual(["rules must be an array of rule objects"]);
+    expect(compileRules({ rules: { 0: { path: "", write: "owner" } } }).errors).toEqual([
+      "rules must be an array of rule objects",
+    ]);
+    expect(compileRules({ rules: null }).errors).toEqual([
+      "rules must be an array of rule objects",
+    ]);
+    expect(compileRules("{}").errors).toEqual(["config must be an object"]);
+    expect(compileRules([]).errors).toEqual(["config must be an object"]);
+  });
+
+  it("closes the view instead of running the defaults", () => {
+    expect(can(encoded, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(encoded, "t/1", "write", viewer(null, "interact"))).toBe(false);
+    expect(can(encoded, "t/1", "read", viewer(A, "interact"))).toBe(false);
+    expect(can(encoded, "t/1", "write", viewer(A, "owner"))).toBe(true);
+  });
+
+  it("still treats an absent rules list as the defaults", () => {
+    for (const config of [{}, undefined, null, { rules: undefined }]) {
+      expect(compileRules(config).errors).toEqual([]);
+      expect(can(config, "t/1", "write", viewer(A, "interact"))).toBe(true);
+    }
+  });
+});
+
+describe("a config bag with the rules key misspelled", () => {
+  // `rulez` is not an absence: the whole declaration is there, and it asks
+  // for the opposite of the defaults. Reading it as "nothing was declared"
+  // put a store the author locked to `owner` one keystroke from anonymously
+  // writable, with no error at publish and nothing visible to the page.
+  const typo = { rulez: [{ path: "", read: "view", write: "owner" }] };
+
+  it("is refused, and closes the view", () => {
+    expect(compileRules(typo).errors).toEqual([
+      'unknown db config key "rulez"; did you mean "rules"?',
+    ]);
+    expect(can(typo, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(typo, "t/1", "write", viewer(null, "interact"))).toBe(false);
+    expect(can(typo, "t/1", "read", viewer(null, "view"))).toBe(false);
+    expect(can(typo, "t/1", "write", viewer(A, "owner"))).toBe(true);
+    for (const key of ["Rules", "rule", "ruIes"]) {
+      expect(compileRules({ [key]: [] }).errors).toHaveLength(1);
+      expect(can({ [key]: [] }, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    }
+  });
+
+  it("leaves a bare absence, and the keys the spine owns, on the defaults", () => {
+    // The config bag is shared with the spine: `optional` is read by
+    // `buildInitCapabilities` and is valid on every capability, and
+    // `{db: true}` / `{db: {}}` both reach this compiler as `{}`.
+    for (const config of [{}, undefined, null, { optional: true }, { rules: undefined }]) {
+      expect(compileRules(config).errors).toEqual([]);
+      expect(can(config, "t/1", "write", viewer(A, "interact"))).toBe(true);
+    }
+    // Only the ABSENCE is judged, so a bag that does declare rules may carry
+    // spine keys beside them without the slice second-guessing the spine.
+    const both = { optional: true, rules: [{ path: "", read: "view", write: "owner" }] };
+    expect(compileRules(both).errors).toEqual([]);
+    expect(can(both, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(both, "t/1", "read", viewer(A, "view"))).toBe(true);
+  });
+
+  it("bounds and escapes the key it echoes back", () => {
+    const nasty = { [`x\ny${"z".repeat(5000)}`]: 1 };
+    const [message] = compileRules(nasty).errors;
+    expect(message).toMatch(/unknown db config key/);
+    expect(message).not.toContain("\n");
+    expect((message as string).length).toBeLessThan(140);
+  });
+});
+
+describe("a rule that sets no level", () => {
+  // `raed` instead of `read`: the author believes the root is locked down,
+  // and every level below it is inherited from the permissive defaults.
+  const typo = { rules: [{ path: "", raed: "owner" }] };
+
+  it("is refused, and closes the view", () => {
+    expect(compileRules(typo).errors).toEqual(["rule 0: a rule must set read, write, or both"]);
+    expect(can(typo, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(typo, "t/1", "read", viewer(null, "view"))).toBe(false);
+  });
+
+  it("still accepts a rule that sets only one level", () => {
+    const one = { rules: [{ path: "notes", write: "admin" }] };
+    expect(compileRules(one).errors).toEqual([]);
+    expect(can(one, "notes/n1", "read", viewer(A, "view"))).toBe(true);
+    expect(can(one, "notes/n1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(one, "notes/n1", "write", viewer(A, "admin"))).toBe(true);
+  });
+});
+
+describe("a {self} rule that sets no level", () => {
+  // The documented way to say "this prefix is private per viewer, levels
+  // unchanged" (db.d.ts: "with no prefix rule, siblings' subtrees stay
+  // private as under `data/users`"), and exactly how the platform writes its
+  // own `data/users/{self}`. The level-less refusal must not catch it: a
+  // `{self}` rule declares privacy, not a level, and it is never a no-op.
+  const cfg = { rules: [{ path: "votes/{self}" }] };
+
+  it("compiles, and leaves every level where it was", () => {
+    expect(compileRules(cfg).errors).toEqual([]);
+    expect(can(cfg, `votes/${A}/x`, "write", viewer(A, "interact"))).toBe(true);
+    expect(can(cfg, `votes/${A}/x`, "read", viewer(A, "view"))).toBe(true);
+    expect(can(cfg, "t/1", "write", viewer(A, "interact"))).toBe(true);
+  });
+
+  it("keeps a sibling's subtree private, from the owner too", () => {
+    expect(can(cfg, `votes/${B}/x`, "read", viewer(A, "owner"))).toBe(false);
+    expect(can(cfg, `votes/${B}/x`, "write", viewer(A, "owner"))).toBe(false);
+    expect(can(cfg, `votes/${B}/x`, "read", viewer(null, "interact"))).toBe(false);
+  });
+
+  it("is carried into the closure when another rule is bad", () => {
+    // Refusing to compile it would drop it from `added`, so the closure
+    // would have no `votes/{self}` to carry and would hand the owner every
+    // viewer's private subtree - the hole the closure exists to shut.
+    const broken = {
+      rules: [{ path: "votes/{self}" }, { path: "bad path!", read: "view" }],
+    };
+    expect(compileRules(broken).errors).toEqual(['rule 1: "bad path!" is not a rule path']);
+    expect(can(broken, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(broken, `votes/${B}/x`, "read", viewer(A, "owner"))).toBe(false);
+    expect(can(broken, `votes/${A}/x`, "read", viewer(A, "owner"))).toBe(true);
+  });
+});
+
+describe("the errors a bad declaration reports", () => {
+  it("bounds and escapes the path it echoes back", () => {
+    // The message reaches a server console and a `POST /api/artifacts` 400
+    // body, so a path may not smuggle newlines into either, or dump a
+    // megabyte on first touch.
+    const nasty = { rules: [{ path: `x\ny/${"z".repeat(5000)}` }] };
+    const [message] = compileRules(nasty).errors;
+    expect(message).toMatch(/is not a rule path/);
+    expect(message).not.toContain("\n");
+    expect((message as string).length).toBeLessThan(120);
   });
 });

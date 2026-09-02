@@ -5,7 +5,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { startServer, type RunningServer } from "../../src/server/index.ts";
 
@@ -53,6 +53,11 @@ async function createArtifact(capabilities: Record<string, unknown>): Promise<st
   });
   const body = (await response.json()) as { id: string };
   return body.id;
+}
+
+/** Longer than the lane's PUSH_COALESCE_MS, so an armed push has landed. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 50));
 }
 
 /** A lane client that queues what the server pushes. */
@@ -226,12 +231,187 @@ describe("the call endpoint", () => {
   });
 });
 
+describe("a rule declaration that does not compile", () => {
+  /** The declaration from the finding: a locked-down root plus one typo. */
+  const oneTypo = {
+    rules: [
+      { path: "", read: "view", write: "owner" },
+      { path: "bad path!", read: "view" },
+    ],
+  };
+
+  async function create(capabilities: Record<string, unknown>) {
+    const response = await fetch(`${server.shellOrigin}/api/artifacts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ html: HTML, capabilities }),
+    });
+    return { status: response.status, body: (await response.json()) as any };
+  }
+
+  it("is refused at POST /api/artifacts, naming the rule", async () => {
+    const refused = await create({ db: { config: oneTypo } });
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe("invalid_content");
+    expect(refused.body.message).toMatch(/db: rule 1: "bad path!" is not a rule path/);
+
+    // A `rules` that is present but is not a list of rules is refused too:
+    // double-encoding leaves a JSON string there, which used to read as "no
+    // declaration" and run the permissive defaults.
+    for (const rules of ['[{"path":"","read":"view","write":"owner"}]', { 0: { path: "" } }]) {
+      const encoded = await create({ db: { config: { rules } } });
+      expect(encoded.status).toBe(400);
+      expect(encoded.body.message).toMatch(/db: rules must be an array of rule objects/);
+    }
+    const noLevel = await create({ db: { config: { rules: [{ path: "", raed: "owner" }] } } });
+    expect(noLevel.status).toBe(400);
+    expect(noLevel.body.message).toMatch(/db: rule 0: a rule must set read, write, or both/);
+
+    // A declared-but-configless db is untouched by any of this.
+    const plain = await create({ db: {} });
+    expect(plain.status).toBe(200);
+    const anyone = new Client();
+    expect(
+      (await anyone.call(plain.body.id, { verb: "set", path: "t/1", body: { a: 1 } })).status,
+    ).toBe(200);
+
+    // The same declaration without the typo is still published and still runs.
+    const accepted = await create({
+      db: { config: { rules: [{ path: "", read: "view", write: "owner" }] } },
+    });
+    expect(accepted.status).toBe(200);
+    const viewer = new Client();
+    const write = await viewer.call(accepted.body.id, {
+      verb: "set",
+      path: "t/1",
+      body: { a: 1 },
+    });
+    expect(write.status).toBe(400);
+    expect(write.body.message).toMatch(/owner sharing level/);
+    expect((await viewer.call(accepted.body.id, { verb: "get", path: "t/1" })).body.exists).toBe(
+      false,
+    );
+  });
+
+  it("refuses a misspelled rules key, but not a bag the spine owns", async () => {
+    // `rulez` is a whole declaration with one keystroke wrong. It used to
+    // read as "nothing declared", so the store the author locked to `owner`
+    // published clean and took anonymous writes.
+    const misspelled = await create({ db: { rulez: [{ path: "", write: "owner" }] } });
+    expect(misspelled.status).toBe(400);
+    expect(misspelled.body.message).toMatch(/db: unknown db config key "rulez"/);
+
+    // A declaration with no config, and one carrying only spine keys, both
+    // still publish and still run the defaults.
+    for (const capabilities of [{ db: {} }, { db: { optional: true } }]) {
+      const plain = await create(capabilities);
+      expect(plain.status).toBe(200);
+      const anyone = new Client();
+      expect(
+        (await anyone.call(plain.body.id, { verb: "set", path: "t/1", body: { a: 1 } })).status,
+      ).toBe(200);
+    }
+  });
+
+  it("publishes a {self} rule that sets no level", async () => {
+    // "This prefix is private per viewer, levels unchanged" - the shape the
+    // platform's own `data/users/{self}` is written in.
+    const created = await create({ db: { rules: [{ path: "votes/{self}" }] } });
+    expect(created.status).toBe(200);
+    const id = created.body.id as string;
+    const alice = new Client();
+    const bob = new Client();
+    // Shared paths are still on the defaults, and the first call is what
+    // hands each client its viewer cookie.
+    expect((await alice.call(id, { verb: "set", path: "t/1", body: { a: 1 } })).status).toBe(200);
+    expect((await bob.call(id, { verb: "get", path: "t/1" })).body.exists).toBe(true);
+
+    expect((await alice.call(id, { verb: "set", path: "votes/me", body: { a: 1 } })).status).toBe(
+      200,
+    );
+    expect((await alice.call(id, { verb: "get", path: `votes/${alice.viewerId}` })).body.data)
+      .toEqual({ a: 1 });
+    // ...and each viewer's subtree under it is private.
+    expect((await bob.call(id, { verb: "get", path: `votes/${alice.viewerId}` })).body.exists)
+      .toBe(false);
+  });
+
+  it("closes the store when one is already stored, and warns once", async () => {
+    // Published before the check existed (or written straight to disk): the
+    // view must close, not fall back to the permissive defaults.
+    const owner = "u_" + "c".repeat(22);
+    const meta = await server.context.store.createArtifact({
+      html: HTML,
+      capabilities: { db: { config: oneTypo } },
+      owner,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const viewer = new Client();
+      const write = await viewer.call(meta.id, { verb: "set", path: "t/1", body: { a: 1 } });
+      expect(write.status).toBe(400);
+      expect(write.body.code).toBe("invalid_argument");
+      expect((await viewer.call(meta.id, { verb: "get", path: "t/1" })).body).toEqual({
+        id: "1",
+        exists: false,
+      });
+      expect((await viewer.call(meta.id, { verb: "query", spec: { collection: "t" } })).body.docs)
+        .toEqual([]);
+
+      // One warning for this artifact, however many calls land on it.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(meta.id);
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/is not a rule path/);
+    } finally {
+      warn.mockRestore();
+    }
+
+    // The owner still reaches the store, so a bad declaration is repairable.
+    const sealed = encodeURIComponent(server.context.auth.seal(owner));
+    const asOwner = (body: unknown) =>
+      fetch(`${server.shellOrigin}/api/frame/db/${meta.id}/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: `av=${sealed}; ao=${sealed}` },
+        body: JSON.stringify(body),
+      }).then(async (r) => ({ status: r.status, body: (await r.json()) as any }));
+    expect((await asOwner({ verb: "set", path: "t/1", body: { a: 1 } })).status).toBe(200);
+    expect((await asOwner({ verb: "get", path: "t/1" })).body.data).toEqual({ a: 1 });
+  });
+
+  it("closes a stored declaration whose rules are not a list either", async () => {
+    // The reviewer's repro: `rules` double-encoded to a JSON string. It read
+    // as "no declaration", so an anonymous `set` on a store the author had
+    // locked to `owner` came back 200.
+    const meta = await server.context.store.createArtifact({
+      html: HTML,
+      capabilities: { db: { config: { rules: '[{"path":"","read":"view","write":"owner"}]' } } },
+      owner: "u_" + "d".repeat(22),
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const viewer = new Client();
+      const write = await viewer.call(meta.id, { verb: "set", path: "t/1", body: { a: 1 } });
+      expect(write.status).toBe(400);
+      expect(write.body.code).toBe("invalid_argument");
+      expect((await viewer.call(meta.id, { verb: "get", path: "t/1" })).body.exists).toBe(false);
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/rules must be an array of rule objects/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 describe("the realtime lane", () => {
   it("delivers rows on subscribe and on another viewer's write", async () => {
     const id = await createArtifact({ db: {} });
     const alice = new Client();
     const bob = new Client();
     await alice.call(id, { verb: "set", path: "tasks/t1", body: { title: "one" } });
+    // A write arms a PUSH_COALESCE_MS timer whether or not anything is
+    // subscribed yet; let this one fire before the subscription exists, or
+    // it delivers the seed snapshot a second time and the next assertion
+    // reads that repeat as the answer to alice's next write.
+    await settle();
     // Give bob a cookie before the lane handshake needs it.
     await bob.call(id, { verb: "get", path: "tasks/t1" });
 
