@@ -80,8 +80,12 @@ lane too, and the refresh timer stops as soon as nothing is subscribed.
   minted for another viewer, artifact or subscription id, so a frame-origin
   page cannot reach another artifact's rows and one grant cannot be replayed
   into unbounded subscriptions.
-- One JSON file per document under `artifacts/<id>/db/`, an in-memory index
-  rebuilt on first touch, and a single-process write lock per artifact.
+- One JSON file per document under `artifacts/<id>/db/`, named `sha256(path)`
+  so two paths can never share a file (`_` and `/` are both inside the segment
+  grammar) and no path is too long to name; the path itself is carried in the
+  file. Files written under the older readable naming are renamed on load. An
+  in-memory index rebuilt on first touch, and a single-process write lock per
+  artifact.
   Last-writer-wins; `update` merges nested objects recursively, replaces
   everything else, and rejects `invalid_argument` when the document is
   absent; `delete` is idempotent and leaves nested documents alone.

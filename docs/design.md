@@ -102,7 +102,7 @@ child of `<head>` instead. `<title>` is read from the first 8 KB for metadata.
 ## Backend storage (v0)
 
 Filesystem under `DATA_DIR` (default `./data`):
-`artifacts/<id>/meta.json` (title, favicon, capabilities declaration, current version), `artifacts/<id>/versions/<ver>/index.html` and other files, `artifacts/<id>/db/` (one JSON file per document; an in-memory index rebuilt at boot; a single-process write lock), `artifacts/<id>/blobs/<id>` with a sidecar `.json` for content type. Publishing is compare-and-set on the current version id and returns `{version}` or a 409 that the broker maps to `conflict`.
+`artifacts/<id>/meta.json` (title, favicon, capabilities declaration, current version), `artifacts/<id>/versions/<ver>/index.html` and other files, `artifacts/<id>/db/` (one JSON file per document, named `sha256(path)` so the name is collision-free and bounded; an in-memory index rebuilt at boot; a single-process write lock), `artifacts/<id>/blobs/<id>` with a sidecar `.json` for content type. Publishing is compare-and-set on the current version id and returns `{version}` or a 409 that the broker maps to `conflict`.
 
 Admin API on the shell origin for tooling: `POST /api/artifacts` (create from HTML + capabilities), `GET /api/artifacts/<id>`, `POST /api/artifacts/<id>/publish` (owner). A CLI `npm run publish -- <file.html> --capabilities '{"db":{}}'` wraps it.
 

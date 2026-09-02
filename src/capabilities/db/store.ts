@@ -7,6 +7,7 @@
  * The caller (server.ts) decides who may see what and hands this module
  * already-authorised paths.
  */
+import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { capError } from "../../protocol/errors.ts";
@@ -15,7 +16,6 @@ import { isPlainObject, mergeDeep } from "./query.ts";
 // applies a page's own write to its mirrors; callers still import them here.
 export { compareValues, isPlainObject, matchesWhere, mergeDeep, orderRows } from "./query.ts";
 import {
-  encodePathForFs,
   isCollectionPath,
   isDocumentPath,
   parentCollection,
@@ -59,6 +59,23 @@ export type QueryOperator = (typeof QUERY_OPERATORS)[number];
 const INVALID = (message: string): never => {
   throw capError("invalid_argument", message);
 };
+
+/* ------------------------------------------------------------------ */
+/* on-disk names                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The file one document lives in. The name is the sha-256 of the exact path,
+ * which is injective and bounded: a readable encoding cannot be either,
+ * because "_" and "/" are both inside the segment grammar (so
+ * `data/users/<vid>/profile` and `data__users__<vid>/profile` would share a
+ * file, letting any writer clobber a private document) and a grammar-valid
+ * 1000-byte path overruns NAME_MAX once escaped. The real path is carried
+ * inside the file as `doc.path`, which is what `load` indexes by.
+ */
+export function docFileName(path: string): string {
+  return `${createHash("sha256").update(path, "utf8").digest("hex")}.json`;
+}
 
 /* ------------------------------------------------------------------ */
 /* shapes                                                              */
@@ -285,6 +302,11 @@ export class DbStore {
             const doc = JSON.parse(raw) as StoredDoc;
             if (typeof doc.path === "string" && isPlainObject(doc.data)) {
               db.docs.set(doc.path, doc);
+              // A file written under the old readable naming keeps its content
+              // but would be orphaned by the next persist/unlink, and would
+              // then resurrect the document on the following boot: adopt it
+              // under the canonical name now.
+              await this.adopt(artifactId, name, doc.path);
             }
           } catch {
             /* a half-written file is not a reason to refuse the whole store */
@@ -322,17 +344,29 @@ export class DbStore {
     }
   }
 
+  /** Move a legacy-named file onto the name persist/unlink use today. */
+  private async adopt(artifactId: string, name: string, path: string): Promise<void> {
+    const canonical = docFileName(path);
+    if (name === canonical) return;
+    const dir = this.dir(artifactId);
+    try {
+      await rename(join(dir, name), join(dir, canonical));
+    } catch {
+      /* the index is already right; a stale file is not worth failing a load */
+    }
+  }
+
   private async persist(artifactId: string, doc: StoredDoc): Promise<void> {
     const dir = this.dir(artifactId);
     await mkdir(dir, { recursive: true });
-    const file = join(dir, `${encodePathForFs(doc.path)}.json`);
+    const file = join(dir, docFileName(doc.path));
     const tmp = `${file}.tmp`;
     await writeFile(tmp, JSON.stringify(doc));
     await rename(tmp, file);
   }
 
   private async unlink(artifactId: string, path: string): Promise<void> {
-    await rm(join(this.dir(artifactId), `${encodePathForFs(path)}.json`), { force: true });
+    await rm(join(this.dir(artifactId), docFileName(path)), { force: true });
   }
 
   /** Live leases only; an expired one is invisible to every caller. */
