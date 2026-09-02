@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -125,6 +125,77 @@ describe("compare-and-set publish", () => {
     expect(await store.readVersionFile(id, "v2", "big.bin")).toBeNull();
   });
 
+  it("normalises a stored contentType sidecar to lowercase on read", async () => {
+    // The capability endpoint normalises going forward, but a sidecar
+    // written before that (or by some other writer) must still compare
+    // correctly against the lowercase document-type check at serve time.
+    await store.publish(id, {
+      baseVersion: "v1",
+      files: {
+        "y.html": { content: Buffer.from("<p>y</p>"), contentType: "TEXT/HTML" },
+      },
+      actor: null,
+    });
+    const file = await store.readVersionFile(id, "v2", "y.html");
+    expect(file?.contentType).toBe("text/html");
+  });
+
+  it("refuses a files publish that targets a <path>.type sidecar directly", async () => {
+    // Without this, `files: {"index.html.type": {...}}` would write straight
+    // to the sidecar `readVersionFile` reads back as index.html's declared
+    // content type — bypassing `contentType` validation for that path
+    // entirely, since the sidecar's own bytes were never checked as a media
+    // type at all.
+    await expect(
+      store.publish(id, {
+        baseVersion: "v1",
+        files: {
+          "index.html.type": {
+            content: Buffer.from("text/plain\r\nx-evil: 1"),
+            contentType: "text/plain",
+          },
+        },
+        actor: null,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_content" });
+    // nothing was written: index.html still serves its normal, sane type
+    expect((await store.readMeta(id))?.currentVersion).toBe("v1");
+    const file = await store.readVersionFile(id, "v1", "index.html");
+    expect(file?.contentType).toBe("text/html");
+  });
+
+  it("refuses a <path>.TYPE sidecar path case-insensitively too", async () => {
+    // A case-insensitive filesystem would collide `index.html.TYPE` with the
+    // real `index.html.type` sidecar just as surely as the lowercase form.
+    await expect(
+      store.publish(id, {
+        baseVersion: "v1",
+        files: {
+          "index.html.TYPE": {
+            content: Buffer.from("text/plain\r\nx-evil: 1"),
+            contentType: "text/plain",
+          },
+        },
+        actor: null,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_content" });
+    expect((await store.readMeta(id))?.currentVersion).toBe("v1");
+  });
+
+  it("heals a sidecar already poisoned on disk instead of handing it to a header verbatim", async () => {
+    // Simulates a version published by a pre-fix build (or any other writer
+    // of the versions directory): the sidecar on disk is not a valid media
+    // type at all.
+    await writeFile(
+      join(dir, "artifacts", id, "versions", "v1", "index.html.type"),
+      "text/plain\r\nx-evil: 1",
+    );
+    const file = await store.readVersionFile(id, "v1", "index.html");
+    // Falls back to the extension guess rather than propagating the invalid
+    // sidecar value (which `Headers.set` would throw on at serve time).
+    expect(file?.contentType).toBe("text/html");
+  });
+
   it("refuses a traversal path", async () => {
     await expect(
       store.publish(id, {
@@ -173,5 +244,41 @@ describe("files-form validation in the frame", () => {
   it("refuses a non-object argument and an empty map", () => {
     expect(() => validateFiles([], true)).toThrowError();
     expect(() => validateFiles({}, true)).toThrowError();
+  });
+
+  // These four exercise the shared `isMediaType` grammar (protocol/paths.ts)
+  // through the frame's own validator, not just the server's: a check that
+  // only lived in `contentType.includes(";")` would miss all but the last.
+  it("refuses a content type carrying CR/LF", () => {
+    try {
+      validateFiles({ "a.txt": { content: "x", contentType: "text/plain\r\nx-evil: 1" } }, true);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toMatchObject({ code: "invalid_content" });
+    }
+  });
+
+  it("refuses a content type with a comma", () => {
+    try {
+      validateFiles({ "a.txt": { content: "x", contentType: "text/plain, x-evil" } }, true);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toMatchObject({ code: "invalid_content" });
+    }
+  });
+
+  it("refuses a content type longer than the grammar allows", () => {
+    const tooLong = `text/${"x".repeat(200)}`;
+    try {
+      validateFiles({ "a.txt": { content: "x", contentType: tooLong } }, true);
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toMatchObject({ code: "invalid_content" });
+    }
+  });
+
+  it("accepts a content type after trim-and-lowercase normalisation", () => {
+    const out = validateFiles({ "a.txt": { content: "x", contentType: " TEXT/Plain " } }, true);
+    expect(out["a.txt"]).toMatchObject({ content: "x", contentType: " TEXT/Plain " });
   });
 });

@@ -15,6 +15,7 @@ import { capError } from "../protocol/errors.ts";
 import {
   isArtifactFilePath,
   isArtifactId,
+  isMediaType,
   isVersionId,
   mintArtifactId,
   nextVersionId,
@@ -241,7 +242,19 @@ export class Store {
       if (!info.isFile()) return null;
       const body = await readFile(target);
       const sidecar = await readFile(`${target}.type`, "utf8").catch(() => null);
-      const contentType = sidecar?.trim() || contentTypeForPath(path) || "application/octet-stream";
+      // The sidecar is only ever trusted when it is itself a bare media type:
+      // `decodeFiles` enforces that on the way in, but the sidecar is a plain
+      // file on disk like any other, and a version published before this
+      // check existed (or one whose `.type` sidecar was poisoned directly —
+      // see `publish`'s rejection of `.type`-suffixed paths) could carry
+      // anything, including a value `Headers.set` would throw on at serve
+      // time. Falling back to the extension guess heals both cases instead
+      // of ever handing an unvalidated string to a response header.
+      const normalised = sidecar?.trim().toLowerCase() ?? null;
+      const contentType =
+        (normalised && isMediaType(normalised) ? normalised : null) ??
+        contentTypeForPath(path) ??
+        "application/octet-stream";
       return { body, contentType };
     } catch {
       return null;
@@ -284,6 +297,17 @@ export class Store {
         if (!isArtifactFilePath(path)) {
           throw capError("invalid_content", `${path}: not a storable path`);
         }
+        // `<path>.type` is the reserved sidecar `readVersionFile` reads back
+        // as another file's content type: a direct publish to that literal
+        // path would let a writer plant arbitrary bytes there (including a
+        // value `Headers.set` rejects, or an unrelated file's declared type)
+        // without ever going through `contentType` validation. Checked
+        // case-insensitively: the filesystem backing this store may itself
+        // be case-insensitive, so `index.html.TYPE` would collide with the
+        // real sidecar just as surely as the lowercase form.
+        if (path.toLowerCase().endsWith(".type")) {
+          throw capError("invalid_content", `${path}: reserved sidecar path`);
+        }
         if (file === null) {
           deleted.add(path);
           continue;
@@ -294,7 +318,7 @@ export class Store {
       // Files carried over from the previous version count against the same
       // budget: the limit is on a version, not on one call's payload.
       for (const path of carried) {
-        const base = path.endsWith(".type") ? path.slice(0, -5) : path;
+        const base = path.toLowerCase().endsWith(".type") ? path.slice(0, -5) : path;
         if (replaced.has(base) || deleted.has(base) || replaced.has(path)) continue;
         bytes += await this.fileSize(id, meta.currentVersion, path);
       }
@@ -308,16 +332,20 @@ export class Store {
       for (const [path, file] of files) {
         if (file === null) continue;
         await this.writeVersionFile(id, version, path, file.content);
+        // Normalised here too (not just trusted from the caller): the
+        // capability endpoint already lowercases and validates, but `Store`
+        // does not assume every caller does, and `readVersionFile` re-checks
+        // this same value on the way back out regardless.
         await this.writeVersionFile(
           id,
           version,
           `${path}.type`,
-          Buffer.from(file.contentType, "utf8"),
+          Buffer.from(file.contentType.trim().toLowerCase(), "utf8"),
         );
       }
 
       for (const path of carried) {
-        const base = path.endsWith(".type") ? path.slice(0, -5) : path;
+        const base = path.toLowerCase().endsWith(".type") ? path.slice(0, -5) : path;
         if (replaced.has(base) || deleted.has(base) || replaced.has(path)) continue;
         const existing = await this.readVersionFile(id, meta.currentVersion, path);
         if (existing) await this.writeVersionFile(id, version, path, existing.body);

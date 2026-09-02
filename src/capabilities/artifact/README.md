@@ -28,6 +28,31 @@ the files that changed, and the shell mints a new immutable version.
 - No live-doc replica/morph/patch protocol, no `data-id` stamping.
 - Reload fan-out is polling, not a websocket lane.
 
+## Serving stored files
+
+`GET /_f/<ver>/<path>` (`src/server/serve.ts`) serves a published file by its
+stored content type:
+
+- `text/html` and `application/xhtml+xml` are enveloped: wrapped with the
+  frame preamble, which installs the RTC lockdown before any author script
+  runs. This is the only case with a preamble.
+- Every other stored type is served as-is, with no preamble and so no RTC
+  lockdown — a writer-chosen type (SVG, XML, or an outright lie about a
+  document) must not be able to execute script as a document on the artifact
+  origin if a viewer is navigated to it directly, so the response carries an
+  unconditional `; sandbox` appended to the frame's normal CSP (layered on
+  top, not in place of it, so `frame-ancestors` and `default-src 'none'`
+  still apply).
+- Script media types (`text/javascript`, `application/javascript`,
+  `application/x-javascript`, `application/ecmascript`, `text/ecmascript` —
+  including a module script, also served as `text/javascript`) are exempted
+  from that `; sandbox` suffix. CSP sandbox is enforced even for a response
+  used as a Worker script (it gets an opaque origin), so sandboxing every
+  non-document type would break `new Worker('/_f/<ver>/w.js')` for an
+  artifact that ships a worker file. This is safe to exempt: navigating to a
+  script URL directly only ever renders it as inert text, never executes it
+  as a document, so no executable document is exposed either way.
+
 ## Wire
 
 | Direction | Message |
