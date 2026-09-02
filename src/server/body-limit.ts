@@ -44,9 +44,11 @@ export const PUBLISH_BODY_LIMIT = 2 * 16 * 1024 * 1024;
  * The admin write routes (`src/server/admin.ts`) only ever carry `html` (no
  * `files`), so they don't need base64 headroom — but JSON string escaping
  * can still inflate a maximal 16 MiB document past a cap sized for the
- * decoded bytes alone. The documented worst case: every decoded byte comes
- * out as the common 2-character escapes (`"` -> `\"`, `\` -> `\\`, a
- * newline -> `\n`), doubling the payload. 2x the decoded ceiling — 16 MiB *
- * 2 — is that worst case, not a guess at a "realistic" ratio.
+ * decoded bytes alone. 2x the decoded ceiling covers the case where every
+ * byte comes out as one of the common 2-character escapes (`"` -> `\"`,
+ * `\` -> `\\`, a newline -> `\n`). It does not cover a document made
+ * mostly of other C0 control bytes, which JSON writes as 6-character
+ * `\u00XX` escapes; such a body is refused 413 here instead of 400 by the
+ * store, which is an acceptable trade for a bound that is known up front.
  */
 export const ADMIN_PUBLISH_BODY_LIMIT = 2 * 16 * 1024 * 1024;
