@@ -41,9 +41,12 @@ class Client {
     return this.cookie ? { ...extra, cookie: this.cookie } : extra;
   }
 
+  /** The owner token is posted, never put in a URL (security review, 9). */
   async login(): Promise<void> {
-    const response = await fetch(`${server.shellOrigin}/login?token=${OWNER_TOKEN}`, {
-      headers: this.headers(),
+    const response = await fetch(`${server.shellOrigin}/login`, {
+      method: "POST",
+      headers: this.headers({ "content-type": "application/x-www-form-urlencoded" }),
+      body: new URLSearchParams({ token: OWNER_TOKEN }).toString(),
       redirect: "manual",
     });
     this.absorb(response);

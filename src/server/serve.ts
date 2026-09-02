@@ -4,7 +4,7 @@
  * and the CSP (design.md "Page envelope", surface-area.md §10). The string
  * builders at the top are pure, so they are unit-testable on their own.
  */
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { connectSrcOrigins } from "../capabilities/network/server.ts";
@@ -14,6 +14,7 @@ import type { FramePreambleConfig } from "../protocol/messages.ts";
 import type { ShellBoot } from "../shell/types.ts";
 import { mountAdminApi } from "./admin.ts";
 import { buildShellBoot } from "./boot.ts";
+import { clientKey, RateLimiter } from "./ratelimit.ts";
 import type { FrameApp, ServerContext } from "./types.ts";
 
 /** The documented reset the platform prepends to author content. */
@@ -252,13 +253,143 @@ function artifactIdFrom(host: string | undefined, header: string | undefined): s
   return header && isArtifactId(header) ? header : null;
 }
 
+/** Login attempts one address may make in a minute, right or wrong. */
+export const LOGIN_ATTEMPTS_PER_WINDOW = 20;
+
+/** Largest login body. The form has two short fields. */
+const MAX_LOGIN_BODY_BYTES = 4096;
+
+/** The login page and its answers: a decision surface, never framed or cached. */
+const LOGIN_HEADERS = {
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+} as const;
+
+const LOGIN_CSS = `:root{color-scheme:light dark}
+body{margin:0;display:grid;place-items:center;min-height:100vh;background:#faf9f5;color:#141413;
+font:14px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}
+@media (prefers-color-scheme:dark){body{background:#1f1e1d;color:#f5f4ef}}
+form{display:grid;gap:8px;width:min(28rem,90vw)}
+input,button{font:inherit;padding:8px;border-radius:6px;border:1px solid #8883}
+.note{color:#a33;margin:0}`;
+
+/**
+ * The owner login form. `next` is echoed back into a hidden field (escaped)
+ * so a link into a page survives the login, exactly as the query form did.
+ */
+export function renderLoginPage(next: string | undefined, message: string | null): string {
+  const nextField = next ? `<input type="hidden" name="next" value="${escapeHtml(next)}">` : "";
+  return (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    "<title>Owner login</title>" +
+    `<style>${LOGIN_CSS}</style>` +
+    '</head><body><form method="post" action="/login">' +
+    "<h1>Owner login</h1>" +
+    (message ? `<p class="note">${escapeHtml(message)}</p>` : "") +
+    '<label for="token">Owner token (<code>ARTIFACT_OWNER_TOKEN</code>)</label>' +
+    '<input id="token" name="token" type="password" autocomplete="current-password" required>' +
+    nextField +
+    '<button type="submit">Log in</button>' +
+    "</form></body></html>"
+  );
+}
+
+/**
+ * The posted credential. Both spellings a client would reach for are read —
+ * the form's `application/x-www-form-urlencoded` and `application/json` —
+ * and nothing else, so a cross-site "simple" `text/plain` post never lands
+ * here.
+ *
+ * Nothing is read until the length says it is small: a declared length is
+ * required (every form and JSON post carries one) and capped, and since the
+ * length is what frames the body on the wire, a client cannot then send more
+ * than it declared. A chunked body, which declares nothing, is refused.
+ */
+async function readLoginBody(
+  c: Context,
+): Promise<{ token: string; next?: string } | { error: string; status: 400 | 411 | 413 | 415 }> {
+  const length = c.req.header("content-length");
+  const declared = length === undefined ? NaN : Number(length);
+  if (!Number.isInteger(declared) || declared < 0) {
+    return { error: "a content-length is required", status: 411 };
+  }
+  if (declared > MAX_LOGIN_BODY_BYTES) {
+    return { error: "the request body is too large", status: 413 };
+  }
+  const type = (c.req.header("content-type") ?? "").split(";")[0]?.trim().toLowerCase();
+  if (type !== "application/x-www-form-urlencoded" && type !== "application/json") {
+    return { error: "post the token as a form or as JSON", status: 415 };
+  }
+  const raw = await c.req.text();
+  let token: unknown;
+  let next: unknown;
+  if (type === "application/json") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      return { error: "bad request body", status: 400 };
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      return { error: "bad request body", status: 400 };
+    }
+    ({ token, next } = parsed as { token?: unknown; next?: unknown });
+  } else {
+    const fields = new URLSearchParams(raw);
+    token = fields.get("token") ?? undefined;
+    next = fields.get("next") ?? undefined;
+  }
+  if (typeof token !== "string") return { error: "bad request body", status: 400 };
+  return typeof next === "string" ? { token, next } : { token };
+}
+
 export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
+  // Guessing the owner token is the one credential attack this server has,
+  // and it is a single secret: a browser logs in once, so a per-address
+  // budget costs a real operator nothing and ends offline-speed guessing.
+  const loginLimit = new RateLimiter(LOGIN_ATTEMPTS_PER_WINDOW);
+
+  /**
+   * The form. It carries no token itself, so this page is safe to link, to
+   * bookmark and to log — which is the whole point of it existing.
+   */
+  const loginPage = (c: Context, message: string | null, status: 200 | 400) =>
+    c.html(renderLoginPage(c.req.query("next"), message), status, LOGIN_HEADERS);
+
   app.get("/login", (c) => {
-    const ok = ctx.auth.login(c, c.req.query("token") ?? "");
-    if (!ok) return c.text("invalid owner token", 403);
-    const next = c.req.query("next");
-    if (next && next.startsWith("/")) return c.redirect(next);
-    return c.text("logged in as the owner");
+    // A token in a query string is written to proxy and access logs and kept
+    // in browser history, so it is refused rather than honoured: the form
+    // below posts it in a body instead. The token in the URL the operator
+    // just used should be treated as burned and rotated.
+    if (c.req.query("token") !== undefined) {
+      return loginPage(c, "The owner token must not travel in a URL - paste it here instead.", 400);
+    }
+    return loginPage(c, null, 200);
+  });
+
+  app.post("/login", async (c) => {
+    if (!loginLimit.allow(clientKey(c))) {
+      return c.text("too many login attempts - wait a minute", 429, LOGIN_HEADERS);
+    }
+    // A login is state-changing and cookie-setting, so it is accepted only
+    // from this origin (or from a bare client, which sends neither header).
+    const origin = c.req.header("origin");
+    const site = c.req.header("sec-fetch-site");
+    if (
+      (origin !== undefined && origin !== ctx.shellOrigin) ||
+      (site !== undefined && site !== "same-origin" && site !== "none")
+    ) {
+      return c.text("cross-site login is refused", 403, LOGIN_HEADERS);
+    }
+    const body = await readLoginBody(c);
+    if ("error" in body) return c.text(body.error, body.status, LOGIN_HEADERS);
+    if (!ctx.auth.login(c, body.token)) return c.text("invalid owner token", 403, LOGIN_HEADERS);
+    const next = body.next ?? c.req.query("next");
+    if (next && next.startsWith("/")) return c.redirect(next, 303);
+    return c.text("logged in as the owner", 200, LOGIN_HEADERS);
   });
 
   app.get("/_shell/shell.js", async (c) => {

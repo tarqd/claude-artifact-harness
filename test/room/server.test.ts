@@ -52,7 +52,10 @@ class Lane {
     if (origin !== null) headers.origin = origin;
     if (viewerId !== null) {
       const sealed = encodeURIComponent(server.context.auth.seal(viewerId));
-      headers.cookie = options.owner ? `av=${sealed}; ao=${sealed}` : `av=${sealed}`;
+      // The owner cookie is bound to the owner token in force, so it is
+      // minted the way `Auth.login` mints it, not from the viewer id alone.
+      const owner = encodeURIComponent(server.context.auth.sealOwnerCookie(viewerId) ?? "");
+      headers.cookie = options.owner ? `av=${sealed}; ao=${owner}` : `av=${sealed}`;
     }
     this.socket = new WebSocket(
       `${base.origin}/api/frame/room/ws?artifact=${artifactId}&peer=${this.peer}`,

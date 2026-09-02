@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer, type RunningServer } from "../src/server/index.ts";
 import { avatarDataUri, colorForId } from "../src/capabilities/user/identity.ts";
+import { loginAsOwner as login } from "./login.ts";
 
 let server: RunningServer;
 let dataDir: string;
@@ -78,7 +79,7 @@ test("the owner sees their own profile and resolves ids", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (err) => errors.push(String(err)));
 
-  await page.goto(`${server.shellOrigin}/login?token=${OWNER_TOKEN}`);
+  await login(page, server.shellOrigin, OWNER_TOKEN);
   await setName(page, "Ada Lovelace");
   await open(page, artifactId);
 

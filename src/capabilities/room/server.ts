@@ -15,7 +15,6 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { isArtifactId } from "../../protocol/paths.ts";
-import { OWNER_COOKIE, VIEWER_COOKIE } from "../../server/auth.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import type { ArtifactMeta } from "../../server/store.ts";
 import {
@@ -229,12 +228,12 @@ export function routes(_apps: ServerApps, ctx: ServerContext): void {
       // lane must reach the same level the shell told the page it had, or
       // the backstop would silently contradict the broker.
       const cookies = readCookies(request.headers.cookie);
-      const viewerId = ctx.auth.unseal(cookies[VIEWER_COOKIE]);
+      const viewerId = ctx.auth.unseal(cookies[ctx.auth.viewerCookieName()]);
       if (viewerId === null) {
         socket.destroy();
         return;
       }
-      const isOwner = ctx.auth.unseal(cookies[OWNER_COOKIE]) === viewerId;
+      const isOwner = ctx.auth.isOwnerCookie(cookies[ctx.auth.ownerCookieName()], viewerId);
 
       // A peer id is a label for one open document of one viewer. Presenting
       // one that another viewer holds is not a reconnect — it is an attempt

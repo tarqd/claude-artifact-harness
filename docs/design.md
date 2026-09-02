@@ -96,7 +96,7 @@ child of `<head>` instead. `<title>` is read from the first 8 KB for metadata.
 
 ## Auth and sharing (v0)
 
-- Every visitor gets a `u_` + 22 base62 chars id in a signed cookie on the shell origin. The owner logs in by visiting `/login?token=<ARTIFACT_OWNER_TOKEN>` (env var); the owner is `owner` on every artifact. Other visitors are `admin` when `ARTIFACT_DEFAULT_LEVEL=admin`, else `interact`. The frame origin gets identity via the asset token in the `/_f/` URL (`__frame_t`), a signed short-lived token that names the viewer and artifact, exactly like claude.ai; the server validates it on every frame-origin request that needs identity.
+- Every visitor gets a `u_` + 22 base62 chars id in a signed cookie on the shell origin. The owner logs in by posting `ARTIFACT_OWNER_TOKEN` (env var) to `/login` — `GET /login` is only the form, and a token in the query string is refused, because a URL is written to proxy logs and browser history. The sealed owner cookie carries a fingerprint of the token it was minted under, so rotating the token ends every owner session; login is throttled per client address. The owner is `owner` on every artifact. Other visitors are `admin` when `ARTIFACT_DEFAULT_LEVEL=admin`, else `interact`. The frame origin gets identity via the asset token in the `/_f/` URL (`__frame_t`), a signed short-lived token that names the viewer and artifact, exactly like claude.ai; the server validates it on every frame-origin request that needs identity.
 - `user.config` sent to the frame: `{id, owner, canEdit, profile: true, email: false}`.
 
 ## Backend storage (v0)
@@ -119,7 +119,7 @@ Admin API on the shell origin for tooling: `POST /api/artifacts` (create from HT
 - The creating viewer is recorded as `meta.owner`, so a dev box without `ARTIFACT_OWNER_TOKEN` still has a real owner per artifact.
 - CSP on the frame origin adds `default-src 'none'`, `form-action 'none'`, `base-uri 'self'` beyond the documented allowlist, so nested iframes and blob workers are blocked until proven needed.
 - `self` is accepted as a declaration name and normalized to `artifact` before `__frame_init`.
-- Security posture: `canEdit` is owner or admin only; the admin API requires the owner cookie, `Authorization: Bearer <ARTIFACT_OWNER_TOKEN>`, or `ARTIFACT_OPEN_ADMIN=1`; both servers bind `127.0.0.1` unless `BIND_HOST` is set. A forged, expired, or wrong-artifact `__frame_t` is a 403; no token is an anonymous viewer. The resolved viewer is exposed to slice routes as the Hono variable `frameViewer`.
+- Security posture: `canEdit` is owner or admin only; the admin API requires the owner cookie, `Authorization: Bearer <ARTIFACT_OWNER_TOKEN>`, or `ARTIFACT_OPEN_ADMIN=1`; both servers bind `127.0.0.1` unless `BIND_HOST` is set, and a wider bind belongs behind a TLS terminator with `PUBLIC_SHELL_URL=https://…` (that setting builds both public origins and is what makes the cookies `Secure` and `__Host-` prefixed; a client-settable `X-Forwarded-Proto` is never trusted for it, since these strings land in `frame-ancestors`). A forged, expired, or wrong-artifact `__frame_t` is a 403; no token is an anonymous viewer. The resolved viewer is exposed to slice routes as the Hono variable `frameViewer`.
 - RPC id prefixes are owned by `src/protocol/capabilities.ts` (`CAP_ID_PREFIXES`); `createRpc` derives them from the cap name, and `RpcOptions.onTimeout` lets a slice choose its timeout outcome.
 - One `BrokerContext` per mounted view; brokers may export `dispose`.
 
