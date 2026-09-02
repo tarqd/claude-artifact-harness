@@ -6,6 +6,7 @@ import * as artifact from "../capabilities/artifact/server.ts";
 import * as assets from "../capabilities/assets/server.ts";
 import * as db from "../capabilities/db/server.ts";
 import * as downloads from "../capabilities/downloads/server.ts";
+import * as mcp from "../capabilities/mcp/server.ts";
 import * as network from "../capabilities/network/server.ts";
 import * as permissions from "../capabilities/permissions/server.ts";
 import * as room from "../capabilities/room/server.ts";
@@ -18,6 +19,7 @@ const SLICES: ReadonlyArray<readonly [string, CapabilityServer]> = [
   ["assets", assets],
   ["db", db],
   ["downloads", downloads],
+  ["mcp", mcp],
   // `network` mounts nothing: its whole backend is the `connect-src` that
   // `serve.ts` builds from its validator, so the module has no `routes`.
   ["network", network as CapabilityServer],

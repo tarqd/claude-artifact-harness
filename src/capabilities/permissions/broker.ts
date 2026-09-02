@@ -26,11 +26,15 @@
 import { CAPABILITY_DISABLED } from "../../protocol/errors.ts";
 import { resolveCapability } from "../../protocol/capabilities.ts";
 import type { BrokerCall, BrokerContext, ConsentRequest } from "../../shell/types.ts";
+import { consentCopy as mcpConsentCopy, manifestOf } from "../mcp/broker.ts";
+import { manifestServer, serverConsentKey } from "../mcp/protocol.ts";
 import {
   CAP,
   CONSENT_CAPS,
+  baseName,
   consentKey,
   normalizeName,
+  scopeOf,
   validateRequestNames,
   validateStateName,
   type PermissionState,
@@ -125,37 +129,82 @@ export function declaredNames(ctx: BrokerContext): Set<string> {
   return out;
 }
 
-export function stateOf(name: string, ctx: BrokerContext): PermissionState {
-  const normalized = normalizeName(name);
-  // A scoped name (`mcp:<server>`, `mcp:host:<name>`) is never in the set:
-  // its base capability is `mcp`, which v0 does not serve at all.
-  if (!declaredNames(ctx).has(normalized)) return "unavailable";
-  // `permissions` is not a capability one asks permission for.
-  if (normalized === CAP) return "granted";
-  if (!CONSENT_CAPS.has(normalized)) return "granted";
-  const stored = readStored(consentKey(ctx.boot.artifactId, normalized));
+/** The stored decision under `key`, or `"prompt"` when the viewer has not decided. */
+function decidedState(key: string): PermissionState {
+  const stored = readStored(key);
   if (stored === "granted" || stored === "denied") return stored;
   return "prompt";
 }
 
 /**
+ * `mcp` is decided per declared server. A scoped name answers for its
+ * server (`"unavailable"` for one the manifest does not declare); the bare
+ * name is the aggregate over the manifest: `"prompt"` while any server is
+ * undecided, else `"denied"` if any was refused, else `"granted"` — which
+ * is what "granted only when every declared server is covered" (mcp.d.ts)
+ * comes to, and vacuously true of an empty manifest.
+ */
+function mcpState(name: string, ctx: BrokerContext): PermissionState {
+  const manifest = manifestOf(ctx);
+  if (name === "mcp") {
+    const states = manifest.servers.map((entry) =>
+      decidedState(serverConsentKey(ctx.boot.artifactId, entry.server)),
+    );
+    if (states.includes("prompt")) return "prompt";
+    if (states.includes("denied")) return "denied";
+    return "granted";
+  }
+  const server = scopeOf(name);
+  if (!manifestServer(manifest, server)) return "unavailable";
+  return decidedState(serverConsentKey(ctx.boot.artifactId, server));
+}
+
+export function stateOf(name: string, ctx: BrokerContext): PermissionState {
+  const normalized = normalizeName(name);
+  const base = baseName(normalized);
+  if (!declaredNames(ctx).has(base)) return "unavailable";
+  // Only `mcp` has scoped names (`mcp:<server>`, `mcp:host:<name>`).
+  if (base === "mcp") return mcpState(normalized, ctx);
+  if (normalized !== base) return "unavailable";
+  // `permissions` is not a capability one asks permission for.
+  if (normalized === CAP) return "granted";
+  if (!CONSENT_CAPS.has(normalized)) return "granted";
+  return decidedState(consentKey(ctx.boot.artifactId, normalized));
+}
+
+/**
  * The whole map: every capability this view declared and this build serves,
  * minus `permissions` itself — it is always present and can never be decided,
- * so listing it would only invite `request(["permissions"])`.
+ * so listing it would only invite `request(["permissions"])`. `mcp` lists
+ * its aggregate and one `mcp:<server>` entry per declared server.
  */
 export function stateMap(ctx: BrokerContext): Record<string, PermissionState> {
   const out: Record<string, PermissionState> = {};
   for (const declared of declaredNames(ctx)) {
     if (declared === CAP) continue;
     out[declared] = stateOf(declared, ctx);
+    if (declared === "mcp") {
+      for (const entry of manifestOf(ctx).servers) {
+        const scoped = `mcp:${entry.server}`;
+        out[scoped] = stateOf(scoped, ctx);
+      }
+    }
   }
   return out;
 }
 
 /* --------------------------------- prompts -------------------------------- */
 
-/** The copy the viewer reads. `sample` matches the `sample` slice's own dialog. */
-function consentCopy(name: string): ConsentRequest {
+/**
+ * The copy the viewer reads. `sample` matches the `sample` slice's own
+ * dialog, and `mcp:<server>` the `mcp` slice's, so the viewer sees the same
+ * question whichever surface asks first.
+ */
+function consentCopy(name: string, ctx: BrokerContext): ConsentRequest {
+  if (baseName(name) === "mcp") {
+    const server = scopeOf(name);
+    return mcpConsentCopy(server, manifestServer(manifestOf(ctx), server)?.tools ?? []);
+  }
   if (name === "sample") {
     return {
       title: "Let this artifact ask Claude?",
@@ -181,7 +230,18 @@ async function decide(
   if (current !== "prompt") return current;
 
   const normalized = normalizeName(name);
-  const key = consentKey(ctx.boot.artifactId, normalized);
+  // The bare `mcp` is the whole manifest: asking it asks for every server,
+  // one dialog after another, and answers with the aggregate.
+  if (normalized === "mcp") {
+    for (const entry of manifestOf(ctx).servers) {
+      await decide(`mcp:${entry.server}`, ctx, ack);
+    }
+    return stateOf("mcp", ctx);
+  }
+  const key =
+    baseName(normalized) === "mcp"
+      ? serverConsentKey(ctx.boot.artifactId, scopeOf(normalized))
+      : consentKey(ctx.boot.artifactId, normalized);
   // The viewer is about to be asked, or to wait on a dialog already up: tell
   // the frame before it opens, so its 130 s budget becomes 900 s while
   // somebody reads the question.
@@ -196,7 +256,7 @@ async function decide(
     if (settled) return settled;
     if (!promptAllowed(ctx.boot.artifactId)) return storedState(key) ?? "denied";
     dialog = ctx
-      .consent(consentCopy(normalized))
+      .consent(consentCopy(normalized, ctx))
       .then((granted): PermissionState => {
         // Same reason, one step later: a decision that landed while this
         // dialog was open is the viewer's first answer, and a stale one must

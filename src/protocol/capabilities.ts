@@ -12,6 +12,7 @@ export const CAPABILITIES = [
   "room",
   "assets",
   "network",
+  "mcp",
 ] as const;
 
 export type CapabilityName = (typeof CAPABILITIES)[number];
@@ -52,6 +53,7 @@ export const CAP_ID_PREFIXES: Readonly<Record<CapabilityName, string>> = Object.
   room: "r",
   assets: "e",
   network: "w",
+  mcp: "c",
 });
 
 /** The id prefix for a capability name, aliases included. */

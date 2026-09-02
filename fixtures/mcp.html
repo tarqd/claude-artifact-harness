@@ -1,0 +1,204 @@
+<title>mcp fixture</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 1rem; }
+  pre { white-space: pre-wrap; word-break: break-all; }
+  button { margin: 0 .25rem .25rem 0; }
+</style>
+<main>
+  <h1>Connectors</h1>
+  <p id="ns" data-state="pending" data-mcp="?" data-frozen="?">resolving&hellip;</p>
+  <p id="servers" data-state="pending" data-names="" data-json="">servers&hellip;</p>
+
+  <label for="k">k</label>
+  <input id="k" type="text" value="one" size="12">
+  <p>
+    <button id="call-echo" type="button">echo (cached 60 s)</button>
+    <button id="call-echo-fresh" type="button">echo (cache: false)</button>
+    <button id="call-write" type="button">write</button>
+    <button id="call-plain" type="button">plain</button>
+    <button id="call-fail" type="button">fail</button>
+    <button id="call-undeclared" type="button">undeclared tool</button>
+    <button id="call-host" type="button">host: server</button>
+    <button id="call-reauth" type="button">needs reauth</button>
+    <button id="call-cancel" type="button">slow, then cancel</button>
+    <button id="call-badinput" type="button">bad input</button>
+    <button id="invalidate" type="button">invalidate echo</button>
+  </p>
+  <p>
+    <button id="watch-start" type="button">watch echo</button>
+    <button id="watch-stop" type="button">stop watching</button>
+    <button id="perm-read" type="button">read permissions</button>
+    <button id="perm-request" type="button">request mcp:Fake Tools</button>
+  </p>
+
+  <p id="out" data-state="idle" data-code="" data-call="" data-cached="">idle</p>
+  <pre id="payload"></pre>
+  <p id="watch" data-events="0" data-last-call="" data-last-cached="" data-code="">no watch</p>
+  <p id="perm" data-scoped="?" data-agg="?" data-unknown="?" data-requested="?">permissions</p>
+  <p>errors: <span id="errors" data-count="0">0</span></p>
+</main>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var nsEl = $('ns'), serversEl = $('servers'), outEl = $('out'), payloadEl = $('payload');
+  var watchEl = $('watch'), permEl = $('perm'), errorsEl = $('errors');
+  var mcp = null;
+  var unsubscribe = null;
+  var watchEvents = 0;
+  var errors = 0;
+
+  window.addEventListener('error', function () {
+    errors++;
+    errorsEl.setAttribute('data-count', String(errors));
+    errorsEl.textContent = String(errors);
+  });
+  window.addEventListener('unhandledrejection', function () {
+    errors++;
+    errorsEl.setAttribute('data-count', String(errors));
+    errorsEl.textContent = String(errors);
+  });
+
+  function input() { return { k: $('k').value }; }
+
+  function show(promise) {
+    outEl.setAttribute('data-state', 'pending');
+    outEl.setAttribute('data-code', '');
+    outEl.setAttribute('data-call', '');
+    outEl.setAttribute('data-cached', '');
+    outEl.textContent = 'pending';
+    payloadEl.textContent = '';
+    return promise.then(function (result) {
+      var payload = result && result.payload;
+      var call = payload && typeof payload === 'object' && 'call' in payload ? String(payload.call) : '';
+      outEl.setAttribute('data-state', 'done');
+      outEl.setAttribute('data-call', call);
+      outEl.setAttribute('data-cached', result && result.cache ? 'yes' : 'no');
+      outEl.setAttribute('data-stored-at', result && result.cache ? String(result.cache.storedAt) : '');
+      outEl.textContent = 'done';
+      payloadEl.textContent = JSON.stringify(payload);
+    }, function (error) {
+      outEl.setAttribute('data-state', 'error');
+      outEl.setAttribute('data-code', (error && error.code) || 'unknown');
+      outEl.setAttribute('data-retryable', error && error.retryable === true ? 'yes' : 'no');
+      outEl.setAttribute('data-has-result', error && error.result ? 'yes' : 'no');
+      outEl.setAttribute('data-server', (error && error.server) || '');
+      outEl.textContent = 'error: ' + ((error && error.code) || error);
+      payloadEl.textContent = (error && error.message) || '';
+    });
+  }
+
+  function listServers() {
+    return mcp.listTools().then(function (listed) {
+      serversEl.setAttribute('data-state', 'listed');
+      serversEl.setAttribute('data-names', listed.servers.map(function (s) { return s.server; }).join(','));
+      serversEl.setAttribute('data-json', JSON.stringify(listed));
+      serversEl.textContent = listed.servers.map(function (s) {
+        return s.server + ' [' + s.authStatus + ']: ' + s.tools.map(function (t) { return t.name; }).join(' ');
+      }).join(' | ') || 'no servers';
+    }, function (error) {
+      serversEl.setAttribute('data-state', 'error');
+      serversEl.setAttribute('data-code', (error && error.code) || 'unknown');
+      serversEl.textContent = 'listTools rejected: ' + ((error && error.code) || error);
+    });
+  }
+
+  function readPermissions() {
+    return window.claude.use('permissions').then(function (permissions) {
+      if (!permissions) {
+        permEl.setAttribute('data-scoped', 'no-permissions');
+        return;
+      }
+      var read = function (name) {
+        return permissions.state(name).catch(function () { return 'unavailable'; });
+      };
+      return Promise.all([read('mcp:Fake Tools'), read('mcp'), read('mcp:Nope')]).then(function (states) {
+        permEl.setAttribute('data-scoped', states[0]);
+        permEl.setAttribute('data-agg', states[1]);
+        permEl.setAttribute('data-unknown', states[2]);
+        permEl.textContent = 'mcp:Fake Tools=' + states[0] + ' mcp=' + states[1] + ' mcp:Nope=' + states[2];
+      });
+    });
+  }
+
+  function bind(id, fn) {
+    $(id).addEventListener('click', function () {
+      if (!mcp) return;
+      fn();
+    });
+  }
+
+  bind('call-echo', function () {
+    show(mcp.callTool('Fake Tools', 'echo', input(), { cache: { staleTime: 60000 } }));
+  });
+  bind('call-echo-fresh', function () {
+    show(mcp.callTool('Fake Tools', 'echo', input(), { cache: false }));
+  });
+  bind('call-write', function () { show(mcp.callTool('Fake Tools', 'write', input())); });
+  bind('call-plain', function () { show(mcp.callTool('Fake Tools', 'plain')); });
+  bind('call-fail', function () { show(mcp.callTool('Fake Tools', 'fail', {})); });
+  bind('call-undeclared', function () { show(mcp.callTool('Fake Tools', 'nope', {})); });
+  bind('call-host', function () { show(mcp.callTool('host:local', 'read_file', { path: '/' })); });
+  bind('call-reauth', function () { show(mcp.callTool('Needs Auth', 'anything', {})); });
+  bind('call-cancel', function () {
+    var controller = new AbortController();
+    setTimeout(function () { controller.abort(); }, 150);
+    show(mcp.callTool('Fake Tools', 'slow', { ms: 5000 }, { cache: false, signal: controller.signal }));
+  });
+  bind('call-badinput', function () { show(mcp.callTool('Fake Tools', 'echo', new Map())); });
+  bind('invalidate', function () {
+    show(mcp.invalidate('Fake Tools', 'echo').then(function () { return { payload: { invalidated: true } }; }));
+  });
+
+  bind('watch-start', function () {
+    if (unsubscribe) return;
+    watchEvents = 0;
+    unsubscribe = mcp.watchTool('Fake Tools', 'echo', input(), function (ev) {
+      watchEvents++;
+      watchEl.setAttribute('data-events', String(watchEvents));
+      if (ev.type === 'data') {
+        watchEl.setAttribute('data-last-call', String(ev.result.payload && ev.result.payload.call));
+        watchEl.setAttribute('data-last-cached', ev.result.cache ? 'yes' : 'no');
+        watchEl.setAttribute('data-code', '');
+        watchEl.textContent = 'data #' + watchEvents + ' call ' + (ev.result.payload && ev.result.payload.call);
+      } else {
+        watchEl.setAttribute('data-code', ev.error.code);
+        watchEl.textContent = 'error #' + watchEvents + ' ' + ev.error.code;
+      }
+    }, { cache: { staleTime: 60000 } });
+    watchEl.setAttribute('data-state', 'watching');
+  });
+  bind('watch-stop', function () {
+    if (!unsubscribe) return;
+    unsubscribe();
+    unsubscribe = null;
+    watchEl.setAttribute('data-state', 'stopped');
+  });
+  bind('perm-read', function () { readPermissions(); });
+  bind('perm-request', function () {
+    window.claude.use('permissions').then(function (permissions) {
+      if (!permissions) return;
+      return permissions.request(['mcp:Fake Tools']).then(function (result) {
+        permEl.setAttribute('data-requested', result['mcp:Fake Tools']);
+      }, function (error) {
+        permEl.setAttribute('data-requested', 'rejected:' + ((error && error.code) || 'unknown'));
+      });
+    });
+  });
+
+  if (!window.claude || typeof window.claude.use !== 'function') {
+    nsEl.setAttribute('data-state', 'absent');
+    return;
+  }
+
+  window.claude.use('mcp').then(function (ns) {
+    mcp = ns;
+    nsEl.setAttribute('data-mcp', ns ? 'yes' : 'no');
+    nsEl.setAttribute('data-frozen', ns && Object.isFrozen(ns) ? 'yes' : 'no');
+    nsEl.setAttribute('data-methods', ns ? Object.keys(ns).sort().join(',') : '');
+    nsEl.setAttribute('data-state', 'resolved');
+    nsEl.textContent = ns ? 'mcp resolved' : 'mcp is null';
+    if (!ns) return;
+    return listServers().then(readPermissions);
+  });
+})();
+</script>

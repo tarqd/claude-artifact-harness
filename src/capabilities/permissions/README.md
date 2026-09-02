@@ -99,12 +99,17 @@ artifact's consent state, and there is no per-account storage to serve.
 4. **The map lists what this build serves.** `permissions` itself is left out
    of `state()` (it is always present and can never be decided, and listing it
    would only invite `request(["permissions"])`), and a declaration this
-   roster does not know — `mcp`, `comments` — is reported `"unavailable"`
+   roster does not know — `comments`, say — is reported `"unavailable"`
    rather than `"granted"`, because no module mounts for it and `use()` on it
    resolves `null`.
-5. **Only `sample` can read `"prompt"`.** The platform's other "decide"
-   capability is `mcp.callTool`/`watchTool`, which v0 does not serve.
-   `CONSENT_CAPS` in `protocol.ts` is the one place to extend.
+5. **`sample` and `mcp` read `"prompt"`.** `mcp` is decided per declared
+   server under the scoped names `mcp:<server>`, stored where the `mcp`
+   slice's own dialog stores them (`consent:<artifactId>:mcp:<server>`); a
+   server the manifest does not declare is `"unavailable"`. The bare `mcp`
+   is the aggregate: `"prompt"` while any server is undecided, else
+   `"denied"` if any was refused, else `"granted"`, and `request(["mcp"])`
+   asks for every server in turn. `stateMap` lists both. `CONSENT_CAPS` in
+   `protocol.ts` is the one place to extend.
 6. **Validation code.** A bad name or an over-long list rejects
    `bad_request` with a plain message, the code the platform's own
    permissions module uses ("state takes no arguments or one capability

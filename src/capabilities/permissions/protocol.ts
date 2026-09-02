@@ -33,10 +33,23 @@ export function isPermissionState(v: unknown): v is PermissionState {
 /**
  * Capabilities whose first use asks the viewer. On claude.ai these are the
  * "decide" capabilities — `sample` and `mcp.callTool`/`watchTool`
- * (docs/analysis/shell.md §"permissions"). `mcp` is out of scope for v0, so
- * `sample` is the only one that can ever read `"prompt"` here.
+ * (docs/analysis/shell.md §"permissions"). `sample` is decided once per
+ * artifact; `mcp` once per declared server, under the scoped names
+ * `mcp:<server>` (see `baseName`).
  */
-export const CONSENT_CAPS: ReadonlySet<string> = new Set(["sample"]);
+export const CONSENT_CAPS: ReadonlySet<string> = new Set(["sample", "mcp"]);
+
+/** The capability a (possibly scoped) name belongs to: `mcp:Foo` → `mcp`. */
+export function baseName(name: string): string {
+  const colon = name.indexOf(":");
+  return colon === -1 ? name : name.slice(0, colon);
+}
+
+/** The scope of a scoped name: `mcp:Foo` → `Foo`, `mcp:host:x` → `host:x`. */
+export function scopeOf(name: string): string {
+  const colon = name.indexOf(":");
+  return colon === -1 ? "" : name.slice(colon + 1);
+}
 
 /**
  * The key the shell stores a decision under. Shared verbatim with the

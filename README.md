@@ -14,7 +14,7 @@ is Anthropic code — the wire protocol is reimplemented from the analysis in
 ## Status
 
 Everything in the v0 roster is implemented and tested end to end: the page
-envelope, the handshake, `claude.use()`, the capability RPC, and all nine
+envelope, the handshake, `claude.use()`, the capability RPC, and all ten
 capability slices. `npm run build && npm test && npm run e2e` is green.
 
 | Capability | What a page gets |
@@ -28,7 +28,8 @@ capability slices. `npm run build && npm test && npm run e2e` is green.
 | `room` | `emit`/`on`, `presence`/`onPeers`, `connected`/`onConnection` over a websocket lane; one in-memory room per artifact, nothing stored or replayed |
 | `assets` | `upload(blob, {type?})`, `list()`, `delete(idOrUrl)`; blobs are served from the artifact's own origin at `/_blob/<id>` and from nobody else's |
 | `network` | `origins()`, and the enforcement half: the declared list is validated and becomes the frame origin's CSP `connect-src` |
-| `mcp`, `comments`, `notifications`, `embed` | not in the v0 roster; `use()` resolves `null` |
+| `mcp` | `listTools()`, `callTool()` with the result cache and cancellation, `watchTool()` with replay and polling, `invalidate()`; consent per server, shared with `permissions.state("mcp:<server>")`. Connectors are server-wide (`MCP_SERVERS`), reached through the official SDK; `host:` servers reject `server_not_connected` |
+| `comments`, `notifications`, `embed` | not in the roster; `use()` resolves `null` |
 
 Each slice's `src/capabilities/<name>/README.md` lists what it implements,
 where it deviates from the platform and why, and how to test it.
@@ -135,10 +136,13 @@ exists to give them.
 | `ANTHROPIC_API_KEY` | unset | the key `sample` calls the Anthropic API with. Without it (and without `SAMPLE_BACKEND=fake`) every `sample` call is refused `sampling_disabled` |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | where `sample` sends its requests — point it at a proxy or a gateway |
 | `SAMPLE_BACKEND` | unset | `fake` swaps the API for a deterministic in-process stand-in that echoes the prompt, streams in chunks and answers tool rounds. It is what the tests run against; use it for local development with no key |
+| `MCP_SERVERS` | unset | the connectors `mcp` can call, as JSON: `[{"name","url","headers"?,"transport"?,"noStore"?}]`. Every viewer shares them; a page addresses them by `name` |
+| `MCP_SERVERS_FILE` | unset | the same JSON, read from a file |
+| `MCP_BACKEND` | unset | `fake` serves three deterministic in-process connectors (`Fake Tools`, `Needs Auth`, `No Store`) with no upstream at all. It is what the tests run against |
 
-`sample`'s three variables are read from `process.env` when the server starts,
-not from `ServerConfig`, so they are set the same way in `npm run dev` and in
-a test's `beforeAll`.
+`sample`'s three variables and `mcp`'s three are read from `process.env` by
+the slice, not from `ServerConfig`, so they are set the same way in
+`npm run dev` and in a test's `beforeAll`.
 
 ## HTTP surface
 
@@ -164,6 +168,7 @@ Slice backends, all on the shell origin behind the viewer cookie:
 | `GET /api/account`, `POST /api/frame/user/{profile,profiles/:id,search/:id,email/:id}` | `user` |
 | `WS /api/frame/room/ws` | `room` |
 | `POST /api/frame/blob/:id/{upload,list,:blobId/delete}` | `assets` |
+| `POST /api/frame/mcp/servers`, `POST /api/frame/mcp/call` | `mcp` |
 
 `permissions`, `downloads` and `network` have no backend at all: the first two
 are decided in the shell, and `network` is only the CSP the frame origin

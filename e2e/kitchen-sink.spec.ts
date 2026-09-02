@@ -3,7 +3,7 @@
  * roster serves, booted through the real shell, frame and server.
  *
  * What it is for is the seams between slices, which a per-slice spec cannot
- * see: ten `use()` names resolving from one `__frame_init`, two websocket
+ * see: eleven `use()` names resolving from one `__frame_init`, two websocket
  * lanes (`db` and `room`) open on the same page at once, `assets` serving
  * `/_blob/<id>` on the frame origin the `network` slice's CSP governs, the
  * legacy `claude.complete()` wrapper reaching the `sample` backend, and the
@@ -63,6 +63,7 @@ const CAPABILITIES = {
   room: { config: { topics: { reaction: "interact" } } },
   assets: {},
   network: { origins: [DECLARED_ORIGIN] },
+  mcp: { servers: [{ server: "Fake Tools", tools: ["echo"] }] },
 };
 
 /** The names the page calls `use()` with — the roster plus the `self` alias. */
@@ -77,6 +78,7 @@ const USED = [
   "room",
   "assets",
   "network",
+  "mcp",
 ];
 
 async function createArtifact(): Promise<string> {
@@ -104,6 +106,7 @@ async function open(page: Page, id: string): Promise<void> {
 
 test.beforeAll(async () => {
   process.env.SAMPLE_BACKEND = "fake";
+  process.env.MCP_BACKEND = "fake";
   dataDir = await mkdtemp(join(tmpdir(), "kitchen-sink-e2e-"));
   fixture = await readFile("fixtures/kitchen-sink.html", "utf8");
   server = await startServer({
@@ -117,6 +120,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   delete process.env.SAMPLE_BACKEND;
+  delete process.env.MCP_BACKEND;
   await server.close();
   await rm(dataDir, { recursive: true, force: true });
 });
@@ -147,7 +151,7 @@ test("every capability resolves and works on one page", async ({ page }) => {
   const smoke = frame(page).locator("#smoke");
   await expect(smoke).toHaveAttribute("data-state", "passed", { timeout: 30_000 });
   await expect(smoke).toHaveAttribute("data-failed", "0");
-  for (const name of ["artifact", "db", "sample", "user", "permissions", "downloads", "room", "assets", "network"]) {
+  for (const name of ["artifact", "db", "sample", "user", "permissions", "downloads", "room", "assets", "network", "mcp"]) {
     await expect(frame(page).locator(`#checks li[data-name="${name}"]`)).toHaveAttribute(
       "data-ok",
       "yes",

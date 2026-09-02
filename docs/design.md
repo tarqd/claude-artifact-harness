@@ -59,8 +59,8 @@ fixtures/            # sample artifact HTML pages exercising each capability
 ```
 
 Slice names (`src/protocol/capabilities.ts`): `artifact`, `db`, `sample`,
-`user`, `permissions`, `downloads`, `room`, `assets`, `network`. Also
-`self` as an alias of `artifact`. Out of scope for v0: `mcp`, `comments`,
+`user`, `permissions`, `downloads`, `room`, `assets`, `network`, `mcp`. Also
+`self` as an alias of `artifact`. Out of scope: `comments`,
 `notifications`, `embed`, live-doc `edit`/`sync` (the artifact namespace
 still exposes `edit` and `sync` and rejects them with `capability_disabled`).
 
@@ -178,10 +178,13 @@ plus every slice in the v0 roster:
 | `room` | `WS /api/frame/room/ws` | one in-memory room per artifact |
 | `assets` | `POST /api/frame/blob/:id/*`, `GET /_blob/:id` | blobs on the artifact's own origin |
 | `network` | none | the declaration → the frame origin's CSP `connect-src` |
+| `mcp` | `POST /api/frame/mcp/{servers,call}` | server-wide connectors (`MCP_SERVERS`) through the MCP SDK; cache and watches live in the shell |
 
 **Stubbed or out of scope.** `artifact.edit` and `artifact.sync` still reject
-`capability_disabled` (live documents). `mcp`, `comments`, `notifications`,
-`embed` are not in the roster: `use()` on them resolves `null`. `email()`
+`capability_disabled` (live documents). `comments`, `notifications`,
+`embed` are not in the roster: `use()` on them resolves `null`. `mcp` is
+served, with server-wide connectors in place of the platform's per-viewer
+ones (`src/capabilities/mcp/README.md`). `email()`
 resolves `null` — there is no account service — though the scope gate is
 implemented and tested. The `db` per-viewer rate limit and write-concurrency
 budgets are not implemented, so a page cannot observe `resource_exhausted`

@@ -8,6 +8,7 @@ import { dispatch } from "../../src/shell/broker.ts";
 import type { BrokerContext, ShellBoot } from "../../src/shell/types.ts";
 import { handle, resetForTest, stateMap, stateOf } from "../../src/capabilities/permissions/broker.ts";
 import { consentKey } from "../../src/capabilities/permissions/protocol.ts";
+import { serverConsentKey } from "../../src/capabilities/mcp/protocol.ts";
 
 const ARTIFACT = "0123456789abcdef0123456789abcdef";
 
@@ -125,10 +126,12 @@ describe("state", () => {
     const ctx = context();
     expect(stateOf("db", ctx)).toBe("unavailable");
     expect(stateOf("nonesuch", ctx)).toBe("unavailable");
-    // Scoped names name `mcp`, which v0 does not serve at all.
+    // Scoped names name `mcp`, which this view did not declare.
     expect(stateOf("mcp:Google Calendar", ctx)).toBe("unavailable");
     expect(stateOf("mcp:host:filesystem", ctx)).toBe("unavailable");
     expect(stateOf("mcp", ctx)).toBe("unavailable");
+    // Only `mcp` has scopes: a scope on anything else names nothing.
+    expect(stateOf("sample:whatever", ctx)).toBe("unavailable");
   });
 
   it("answers for both spellings of artifact/self", () => {
@@ -371,5 +374,88 @@ describe("through the shell dispatcher", () => {
       code: "bad_request",
       message: "a capability name must be a string",
     });
+  });
+});
+
+/* ----------------------------------- mcp ---------------------------------- */
+
+describe("mcp scoped names", () => {
+  const MANIFEST = {
+    servers: [
+      { server: "Fake Tools", tools: ["echo", "write"] },
+      { server: "host:filesystem", tools: ["read_file"] },
+    ],
+  };
+  const DECLARED = { permissions: { config: {} }, sample: { config: {} }, mcp: { config: MANIFEST } };
+  const KEY = serverConsentKey(ARTIFACT, "Fake Tools");
+  const HOST_KEY = serverConsentKey(ARTIFACT, "host:filesystem");
+  const request = (id: string, args: unknown[]) => ({ cap: "permissions", id, method: "request", args });
+
+  it("reads a declared server as prompt until decided, and an undeclared one as unavailable", () => {
+    const ctx = context(DECLARED);
+    expect(stateOf("mcp:Fake Tools", ctx)).toBe("prompt");
+    expect(stateOf("mcp:host:filesystem", ctx)).toBe("prompt");
+    expect(stateOf("mcp:Google Calendar", ctx)).toBe("unavailable");
+    installStorage({ [KEY]: "granted" });
+    expect(stateOf("mcp:Fake Tools", ctx)).toBe("granted");
+    installStorage({ [KEY]: "denied" });
+    expect(stateOf("mcp:Fake Tools", ctx)).toBe("denied");
+  });
+
+  it("aggregates the bare name over the manifest", () => {
+    const ctx = context(DECLARED);
+    expect(stateOf("mcp", ctx)).toBe("prompt");
+    installStorage({ [KEY]: "granted" });
+    expect(stateOf("mcp", ctx)).toBe("prompt");
+    installStorage({ [KEY]: "granted", [HOST_KEY]: "denied" });
+    expect(stateOf("mcp", ctx)).toBe("denied");
+    installStorage({ [KEY]: "granted", [HOST_KEY]: "granted" });
+    expect(stateOf("mcp", ctx)).toBe("granted");
+    // An empty manifest has nothing to decide.
+    const empty = context({ permissions: { config: {} }, mcp: { config: { servers: [] } } });
+    expect(stateOf("mcp", empty)).toBe("granted");
+    expect(stateOf("mcp:Fake Tools", empty)).toBe("unavailable");
+  });
+
+  it("lists the aggregate and every server in the map", () => {
+    installStorage({ [KEY]: "granted" });
+    expect(stateMap(context(DECLARED))).toEqual({
+      sample: "prompt",
+      mcp: "prompt",
+      "mcp:Fake Tools": "granted",
+      "mcp:host:filesystem": "prompt",
+    });
+  });
+
+  it("request asks per server with the mcp slice's copy, and the bare name asks for all", async () => {
+    const data = installStorage();
+    const ctx = context(DECLARED);
+    expect(await handle(request("p1", [["mcp:Fake Tools"]]), ctx)).toEqual({ "mcp:Fake Tools": "granted" });
+    expect(ctx.asked).toEqual([{ title: "Let this artifact use Fake Tools?", ackedFirst: true }]);
+    expect(data.get(KEY)).toBe("granted");
+
+    expect(await handle(request("p2", [["mcp"]]), ctx)).toEqual({ mcp: "granted" });
+    expect(ctx.asked.map((a) => a.title)).toEqual([
+      "Let this artifact use Fake Tools?",
+      "Let this artifact use host:filesystem?",
+    ]);
+    expect(data.get(HOST_KEY)).toBe("granted");
+  });
+
+  it("a denied server makes the aggregate denied without re-asking", async () => {
+    const ctx = context(DECLARED, (n) => n === 3);
+    expect(await handle(request("p1", []), ctx)).toEqual({
+      sample: "denied",
+      mcp: "denied",
+      "mcp:Fake Tools": "denied",
+      "mcp:host:filesystem": "granted",
+    });
+    expect(ctx.asked.map((a) => a.title)).toEqual([
+      "Let this artifact ask Claude?",
+      "Let this artifact use Fake Tools?",
+      "Let this artifact use host:filesystem?",
+    ]);
+    expect(await handle(request("p2", [["mcp"]]), ctx)).toEqual({ mcp: "denied" });
+    expect(ctx.asked).toHaveLength(3);
   });
 });

@@ -10,6 +10,7 @@ import * as artifact from "../capabilities/artifact/broker.ts";
 import * as assets from "../capabilities/assets/broker.ts";
 import * as db from "../capabilities/db/broker.ts";
 import * as downloads from "../capabilities/downloads/broker.ts";
+import * as mcp from "../capabilities/mcp/broker.ts";
 import * as network from "../capabilities/network/broker.ts";
 import * as permissions from "../capabilities/permissions/broker.ts";
 import * as room from "../capabilities/room/broker.ts";
@@ -21,6 +22,7 @@ export const BROKERS: Readonly<Record<CapabilityName, CapabilityBroker>> = Objec
   assets,
   db,
   downloads,
+  mcp,
   network,
   permissions,
   room,

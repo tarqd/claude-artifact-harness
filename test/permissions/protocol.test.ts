@@ -96,7 +96,7 @@ describe("vocabulary and helpers", () => {
 
   it("uses the same storage key the sample slice reads", () => {
     expect(consentKey("abc", "sample")).toBe("consent:abc:sample");
-    expect([...CONSENT_CAPS]).toEqual(["sample"]);
+    expect([...CONSENT_CAPS]).toEqual(["sample", "mcp"]);
   });
 
   it("maps every asked name to unavailable", () => {

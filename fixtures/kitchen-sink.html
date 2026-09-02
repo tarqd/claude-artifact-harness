@@ -85,7 +85,7 @@
   /* Every name the roster can serve, aliases included. */
   var NAMES = [
     'artifact', 'self', 'db', 'sample', 'user',
-    'permissions', 'downloads', 'room', 'assets', 'network'
+    'permissions', 'downloads', 'room', 'assets', 'network', 'mcp'
   ];
 
   function row(list, name, ok, detail) {
@@ -299,6 +299,18 @@
         return ns.network.origins().then(function (origins) {
           want(Array.isArray(origins), 'origins() is an array');
           return 'origins: ' + origins.join(' ');
+        });
+      }),
+
+      check('mcp', function () {
+        // Not `callTool`: its first use asks the viewer (see `sample`).
+        return ns.mcp.listTools().then(function (listed) {
+          want(Array.isArray(listed.servers), 'listTools() lists servers');
+          var fake = listed.servers.filter(function (s) { return s.server === 'Fake Tools'; })[0];
+          want(!!fake, 'the declared server is connected');
+          want(fake.authStatus === 'connected', 'its auth status is connected');
+          want(fake.tools.length === 1 && fake.tools[0].name === 'echo', 'only the declared tool is listed');
+          return 'servers: ' + listed.servers.map(function (s) { return s.server; }).join(' ');
         });
       })
     ];
