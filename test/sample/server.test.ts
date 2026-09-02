@@ -6,6 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { openStreamCount } from "../../src/capabilities/sample/server.ts";
 import { startServer, type RunningServer } from "../../src/server/index.ts";
 import type { SampleEvent } from "../../src/capabilities/sample/protocol.ts";
 
@@ -349,4 +350,95 @@ describe("POST /api/frame/sample/call", () => {
       if (key !== undefined) process.env.ANTHROPIC_API_KEY = key;
     }
   });
+});
+
+/* ------------------------------ concurrency ------------------------------- */
+
+/** A prompt the fake backend answers slowly enough to hold a stream open. */
+const HOLD = `!slow ${"x".repeat(4_000)}`;
+
+/** A viewer cookie of its own, as a first visit to the shell page mints one. */
+async function mintCookie(): Promise<string> {
+  const page = await fetch(`${server.shellOrigin}/a/${artifactId}`);
+  const minted = (page.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  expect(minted).toMatch(/^av=/);
+  return minted;
+}
+
+/** One call, with the given cookie or none at all, abortable by the caller. */
+function open(signal: AbortSignal, jar: string | null, input: string): Promise<Response> {
+  return fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(jar === null ? {} : { cookie: jar }) },
+    body: JSON.stringify({ callId: nextCallId(), artifactId, input }),
+    signal,
+  });
+}
+
+async function waitFor(predicate: () => boolean, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("condition never held");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+describe("concurrency caps", () => {
+  it("charges cookie-less callers one budget, not a fresh one each", async () => {
+    const controller = new AbortController();
+    try {
+      const held = await Promise.all(
+        Array.from({ length: 8 }, () => open(controller.signal, null, HOLD)),
+      );
+      expect(held.every((r) => r.status === 200)).toBe(true);
+      await waitFor(() => openStreamCount() === 8);
+      // Nine cookie-less calls used to be nine viewers: each request minted
+      // its own id, so each got its own eight-stream budget.
+      const ninth = await open(controller.signal, null, "hi");
+      expect(ninth.status).toBe(429);
+      expect((await ninth.json()) as { code: string }).toMatchObject({ code: "rate_limited" });
+      // A viewer holding a cookie of their own still gets their own budget.
+      const legit = await open(controller.signal, await mintCookie(), "hello there");
+      expect(legit.status).toBe(200);
+      expect(textOf(await collect(legit))).toContain("hello there");
+    } finally {
+      controller.abort();
+      await waitFor(() => openStreamCount() === 0);
+    }
+  }, 30_000);
+
+  it("caps streams server-wide, however many viewers ask", async () => {
+    const controller = new AbortController();
+    try {
+      const jars = await Promise.all(Array.from({ length: 4 }, () => mintCookie()));
+      const held = await Promise.all(
+        jars.flatMap((jar) => Array.from({ length: 8 }, () => open(controller.signal, jar, HOLD))),
+      );
+      expect(held.every((r) => r.status === 200)).toBe(true);
+      await waitFor(() => openStreamCount() === 32);
+      // A fresh viewer, inside their own per-viewer budget, still waits: the
+      // server has no stream (and no upstream request) left to give.
+      const refused = await open(controller.signal, await mintCookie(), "hi");
+      expect(refused.status).toBe(429);
+      expect((await refused.json()) as { code: string }).toMatchObject({ code: "rate_limited" });
+    } finally {
+      controller.abort();
+      await waitFor(() => openStreamCount() === 0);
+    }
+  }, 30_000);
+
+  it("frees a slot when the stream ends, so the next call goes through", async () => {
+    const before = openStreamCount();
+    const jar = await mintCookie();
+    for (let i = 0; i < 10; i++) {
+      const response = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: jar },
+        body: JSON.stringify({ callId: nextCallId(), artifactId, input: "hi" }),
+      });
+      expect(response.status).toBe(200);
+      await collect(response);
+    }
+    await waitFor(() => openStreamCount() === before);
+  }, 30_000);
 });

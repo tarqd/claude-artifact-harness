@@ -50,10 +50,21 @@ export class Auth {
     return value;
   }
 
+  /**
+   * The viewer this request already carries a signed cookie for, or `null`
+   * when it carries none. `viewer()` mints an id for such a request, so a
+   * budget keyed on that id is a budget a cookie-less caller renews on every
+   * request: anything counting per viewer reads this instead.
+   */
+  existingViewerId(c: Context): string | null {
+    const value = this.unseal(getCookie(c, VIEWER_COOKIE));
+    return isUserId(value) ? value : null;
+  }
+
   /** Read the viewer cookie, minting and setting one when absent. */
   viewer(c: Context): Viewer {
-    const existing = this.unseal(getCookie(c, VIEWER_COOKIE));
-    const id = isUserId(existing) ? existing : mintUserId();
+    const existing = this.existingViewerId(c);
+    const id = existing ?? mintUserId();
     if (id !== existing) {
       setCookie(c, VIEWER_COOKIE, this.seal(id), {
         path: "/",

@@ -47,9 +47,20 @@ const MAX_BODY_BYTES = 8_000_000;
 /** The image types the Messages API reads. */
 const API_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const MAX_TOOL_DEFINITIONS_BYTES = 32_768;
-/** Streams one viewer may hold open at once, across every tab they have. */
+/** Streams one caller may hold open at once, across every tab they have. */
 const MAX_STREAMS_PER_VIEWER = 8;
-/** Calls parked on a page's tool results at once, server-wide. */
+/**
+ * Streams open at once, server-wide, whoever asks. Every one of them is a
+ * socket and an upstream Messages API request on the operator's key, so this
+ * is the bound that holds when the per-caller one is spread across callers.
+ * Lower than mcp's 64 in-flight calls because these spend the key.
+ */
+const MAX_STREAMS_TOTAL = 32;
+/**
+ * Calls parked on a page's tool results at once, server-wide. A parked call
+ * holds its stream, so `MAX_STREAMS_TOTAL` already bounds this; it stays as
+ * its own bound because the two limits are free to move apart.
+ */
 const MAX_PARKED_TOOL_CALLS = 64;
 
 /* --------------------------------- backend -------------------------------- */
@@ -414,20 +425,61 @@ interface ToolWaiter {
 
 /** Calls whose stream is parked on the page's tool results. */
 const waiters = new Map<string, ToolWaiter>();
-/** Open streams per viewer, so one caller cannot hold the server open. */
-const streamsPerViewer = new Map<string, number>();
 
-function takeStream(viewerId: string): boolean {
-  const open = streamsPerViewer.get(viewerId) ?? 0;
-  if (open >= MAX_STREAMS_PER_VIEWER) return false;
-  streamsPerViewer.set(viewerId, open + 1);
-  return true;
+/**
+ * In-flight accounting, as mcp's `Slots` does it: one slot per open stream,
+ * counted per caller and server-wide. The per-caller bound keeps one viewer
+ * from taking the whole server; the server-wide bound is what still holds
+ * when the calls are spread over many callers.
+ */
+class Streams {
+  private total = 0;
+  private readonly perCaller = new Map<string, number>();
+
+  get open(): number {
+    return this.total;
+  }
+
+  /** A release function, or which bound refused this stream. */
+  take(caller: string): (() => void) | "server_busy" | "caller_busy" {
+    if (this.total >= MAX_STREAMS_TOTAL) return "server_busy";
+    const held = this.perCaller.get(caller) ?? 0;
+    if (held >= MAX_STREAMS_PER_VIEWER) return "caller_busy";
+    this.total++;
+    this.perCaller.set(caller, held + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.total--;
+      const now = this.perCaller.get(caller) ?? 1;
+      if (now <= 1) this.perCaller.delete(caller);
+      else this.perCaller.set(caller, now - 1);
+    };
+  }
 }
 
-function releaseStream(viewerId: string): void {
-  const open = (streamsPerViewer.get(viewerId) ?? 1) - 1;
-  if (open <= 0) streamsPerViewer.delete(viewerId);
-  else streamsPerViewer.set(viewerId, open);
+const streams = new Streams();
+
+/** Test hook: how many streams are open server-wide right now. */
+export function openStreamCount(): number {
+  return streams.open;
+}
+
+/**
+ * Who an open stream is charged to. Only a cookie this server signed names a
+ * viewer here: `auth.viewer()` mints an id for a request that carries none,
+ * so keying the per-caller budget on that id would hand a fresh budget to
+ * every cookie-less request — the cap would come free to any caller that
+ * simply keeps no cookie. Those requests share one bucket per address
+ * instead, and `MAX_STREAMS_TOTAL` bounds the rest.
+ */
+function callerKey(c: Context, ctx: ServerContext): string {
+  const signed = ctx.auth.existingViewerId(c);
+  if (signed) return `viewer:${signed}`;
+  const env = c.env as { incoming?: { socket?: { remoteAddress?: unknown } } } | null | undefined;
+  const address = env?.incoming?.socket?.remoteAddress;
+  return `addr:${typeof address === "string" && address ? address : "unknown"}`;
 }
 
 /* --------------------------------- routes --------------------------------- */
@@ -604,6 +656,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
     // the shell page, is what a direct HTTP caller meets.
     let plan: {
       viewerId: string;
+      release(): void;
       callId: string;
       input: SampleInput;
       modelTier: ModelTier;
@@ -648,11 +701,21 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       const backend = selectBackend();
       if (isCapError(backend)) throw new Refusal(503, backend);
 
-      if (!takeStream(viewer.id)) {
+      // Last, so nothing below can refuse the call after a slot is held.
+      const slot = streams.take(callerKey(c, ctx));
+      if (slot === "server_busy") {
+        refuse(
+          429,
+          "rate_limited",
+          "this server is running as many calls as it will hold - try again shortly",
+        );
+      }
+      if (slot === "caller_busy") {
         refuse(429, "rate_limited", "too many calls at once - let the viewer try again");
       }
       plan = {
         viewerId: viewer.id,
+        release: slot,
         callId: body.callId,
         input,
         modelTier: isModelTier(body.modelTier) ? body.modelTier : "default",
@@ -666,7 +729,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       throw err;
     }
 
-    const { viewerId, callId, input, modelTier, format, tools, images, backend } = plan;
+    const { viewerId, release, callId, input, modelTier, format, tools, images, backend } = plan;
     return streamSSE(c, async (stream) => {
       const controller = new AbortController();
       stream.onAbort(() => controller.abort());
@@ -730,7 +793,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
         }
       } finally {
         waiters.delete(callId);
-        releaseStream(viewerId);
+        release();
       }
       await chain;
     });
