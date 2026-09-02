@@ -166,6 +166,7 @@ describe("the gate", () => {
       body: JSON.stringify({ artifactId }),
     });
     expect(listing.status).toBe(403);
+    expect(listing.headers.get("set-cookie")).toBeNull();
     // And the refusal comes before the body is read, so an oversized body
     // from a caller with no session is a 403, not a 413: nothing is buffered
     // for it.
