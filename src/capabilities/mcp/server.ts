@@ -19,6 +19,7 @@ import type { Context } from "hono";
 import type { StatusCode } from "hono/utils/http-status";
 import { capError, type CapError } from "../../protocol/errors.ts";
 import { isArtifactId } from "../../protocol/paths.ts";
+import type { Viewer } from "../../server/auth.ts";
 import type { ArtifactMeta } from "../../server/store.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import { createClientPool } from "./client.ts";
@@ -97,13 +98,19 @@ function statusFor(error: McpError): FailStatus {
 }
 
 /**
- * Only the shell page may call these lanes. A connector call has side
- * effects and the viewer's consent is kept in the shell page alone, so a
- * request from any other site — which the browser would otherwise send as
+ * Only the shell page, and only a browser it has already seated, may call
+ * these lanes; the viewer it carries is the answer. A connector call has
+ * side effects and the viewer's consent is kept in the shell page alone, so
+ * a request from any other site — which the browser would otherwise send as
  * a "simple" cross-site POST, with the cookie under `SameSite=Lax` left
- * off but the effect still happening — is refused before the body is read.
+ * off but the effect still happening — is refused. So is one with no viewer
+ * cookie of ours: a connector runs on the operator's credential, which every
+ * viewer shares, and `auth.viewer()` would mint an identity for whoever
+ * asked and hand it the default level, turning a published manifest into a
+ * public API onto the connector. Both run before the body is read, so a
+ * caller with no session never gets half a megabyte buffered for it.
  */
-function sameOriginOnly(c: Context, ctx: ServerContext): void {
+function fromShellSession(c: Context, ctx: ServerContext): Viewer {
   const contentType = (c.req.header("content-type") ?? "").toLowerCase();
   if (!contentType.startsWith("application/json")) {
     refuse(415, "bad_request", "the body must be application/json");
@@ -116,6 +123,11 @@ function sameOriginOnly(c: Context, ctx: ServerContext): void {
   if (origin !== undefined && origin !== ctx.shellOrigin) {
     refuse(403, "not_granted", "connector calls are only accepted from the shell page");
   }
+  const viewer = ctx.auth.existingViewer(c);
+  if (!viewer) {
+    refuse(403, "not_granted", "connector calls need a viewer session; open the artifact page first");
+  }
+  return viewer;
 }
 
 /**
@@ -179,17 +191,8 @@ interface Gate {
   viewerId: string;
 }
 
-/** Resolve the artifact, its manifest and the asking viewer, or refuse. */
-async function gate(c: Context, ctx: ServerContext, body: Record<string, unknown>): Promise<Gate> {
-  // A connector runs on the operator's credential, which every viewer shares,
-  // so the caller has to be a browser that has already opened an artifact:
-  // `auth.viewer()` would mint an identity for a cookie-less request and hand
-  // it the default level, turning a published manifest into a public API onto
-  // the connector. The shell page's own fetches carry the cookie.
-  const viewer = ctx.auth.existingViewer(c);
-  if (!viewer) {
-    refuse(403, "not_granted", "connector calls need a viewer session; open the artifact page first");
-  }
+/** Resolve the artifact and its manifest for an already-seated viewer, or refuse. */
+async function gate(ctx: ServerContext, viewer: Viewer, body: Record<string, unknown>): Promise<Gate> {
   const artifactId = body.artifactId;
   if (typeof artifactId !== "string" || !isArtifactId(artifactId)) {
     refuse(400, "bad_request", "bad artifact id");
@@ -287,8 +290,8 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
     let resolved: Gate;
     let dir: ConnectorDirectory;
     try {
-      sameOriginOnly(c, ctx);
-      resolved = await gate(c, ctx, await readBody(c));
+      const viewer = fromShellSession(c, ctx);
+      resolved = await gate(ctx, viewer, await readBody(c));
       dir = directoryOf();
     } catch (err) {
       if (err instanceof Refusal) return c.json(err.error, err.status);
@@ -330,9 +333,9 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       dir: ConnectorDirectory;
     };
     try {
-      sameOriginOnly(c, ctx);
+      const viewer = fromShellSession(c, ctx);
       const body = await readBody(c);
-      const resolved = await gate(c, ctx, body);
+      const resolved = await gate(ctx, viewer, body);
       const { server, tool } = body;
       if (!isName(server)) refuse(400, "bad_request", "server must be a connector's display name");
       if (!isName(tool)) refuse(400, "bad_request", "tool must be a tool name");

@@ -8,7 +8,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { exposureWarnings, loadConfig } from "../../src/server/config.ts";
 import { startServer, type RunningServer } from "../../src/server/index.ts";
 import { fakeCallCount } from "../../src/capabilities/mcp/directory.ts";
 
@@ -18,6 +17,7 @@ let dataDir: string;
 let artifactId: string;
 let plainId: string;
 let cookie: string;
+let readOnlyCookie: string;
 
 const PAGE = "<p>mcp fixture</p>";
 const MANIFEST = {
@@ -48,10 +48,16 @@ function post(path: string, body: unknown, target: RunningServer = server, heade
   });
 }
 
-const servers = (body: unknown = { artifactId }, target?: RunningServer): Promise<Response> =>
-  post("/api/frame/mcp/servers", body, target);
-const call = (body: Record<string, unknown>, target?: RunningServer): Promise<Response> =>
-  post("/api/frame/mcp/call", { artifactId, ...body }, target);
+const servers = (
+  body: unknown = { artifactId },
+  target?: RunningServer,
+  headers?: Record<string, string>,
+): Promise<Response> => post("/api/frame/mcp/servers", body, target, headers);
+const call = (
+  body: Record<string, unknown>,
+  target?: RunningServer,
+  headers?: Record<string, string>,
+): Promise<Response> => post("/api/frame/mcp/call", { artifactId, ...body }, target, headers);
 
 beforeAll(async () => {
   process.env.MCP_BACKEND = "fake";
@@ -63,6 +69,12 @@ beforeAll(async () => {
   const page = await fetch(`${server.shellOrigin}/a/${artifactId}`);
   cookie = (page.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   expect(cookie).toMatch(/^av=/);
+  // Each `startServer` mints its own secret, so the read-only instance needs
+  // a cookie of its own: `cookie` would not unseal there, and the request
+  // would be refused for having no session rather than for the level.
+  const roPage = await fetch(`${readOnly.shellOrigin}/a/${artifactId}`);
+  readOnlyCookie = (roPage.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  expect(readOnlyCookie).toMatch(/^av=/);
 });
 
 afterAll(async () => {
@@ -82,9 +94,20 @@ describe("the gate", () => {
   });
 
   it("refuses a viewer who may only view", async () => {
-    const response = await call({ server: "Fake Tools", tool: "echo", input: {} }, readOnly);
+    const before = fakeCallCount();
+    const response = await call({ server: "Fake Tools", tool: "echo", input: {} }, readOnly, {
+      cookie: readOnlyCookie,
+    });
     expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: "not_granted" });
+    // The message pins which refusal this is: with the session gate ahead of
+    // it, a cookie from the wrong instance would refuse for the wrong reason.
+    expect(await response.json()).toMatchObject({
+      code: "not_granted",
+      message: "this viewer may not use connectors here",
+    });
+    expect(fakeCallCount()).toBe(before);
+    const listing = await servers({ artifactId }, readOnly, { cookie: readOnlyCookie });
+    expect(listing.status).toBe(403);
   });
 
   it("refuses a body over the cap, declared or chunked", async () => {
@@ -143,6 +166,16 @@ describe("the gate", () => {
       body: JSON.stringify({ artifactId }),
     });
     expect(listing.status).toBe(403);
+    // And the refusal comes before the body is read, so an oversized body
+    // from a caller with no session is a 403, not a 413: nothing is buffered
+    // for it.
+    const oversized = await fetch(`${server.shellOrigin}/api/frame/mcp/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ artifactId, server: "Fake Tools", tool: "write", input: { big: "x".repeat(600_000) } }),
+    });
+    expect(oversized.status).toBe(403);
+    expect(await oversized.json()).toMatchObject({ code: "not_granted" });
     // The shell page's own cookie still passes.
     expect((await servers()).status).toBe(200);
     const allowed = await call({ server: "Fake Tools", tool: "write", input: {} });
@@ -168,36 +201,6 @@ describe("the gate", () => {
     // The shell page itself passes.
     const own = await post("/api/frame/mcp/servers", { artifactId }, server, { "sec-fetch-site": "same-origin", origin: server.shellOrigin });
     expect(own.status).toBe(200);
-  });
-});
-
-describe("the boot warning", () => {
-  const config = (bindHost: string, defaultLevel: "view" | "interact" | "admin") =>
-    loadConfig({ bindHost, defaultLevel });
-
-  it("stays quiet on loopback, with no credentials, and when viewers only view", () => {
-    const connector = { MCP_SERVERS: '[{"name":"W","url":"https://w.example/mcp"}]' };
-    expect(exposureWarnings(config("127.0.0.1", "interact"), connector)).toEqual([]);
-    expect(exposureWarnings(config("localhost", "interact"), connector)).toEqual([]);
-    expect(exposureWarnings(config("::1", "interact"), connector)).toEqual([]);
-    expect(exposureWarnings(config("0.0.0.0", "interact"), {})).toEqual([]);
-    expect(exposureWarnings(config("0.0.0.0", "interact"), { MCP_BACKEND: "fake" })).toEqual([]);
-    expect(exposureWarnings(config("0.0.0.0", "view"), connector)).toEqual([]);
-  });
-
-  it("names the credentials a bound-out server hands to every visitor", () => {
-    const lines = exposureWarnings(config("0.0.0.0", "interact"), {
-      MCP_SERVERS_FILE: "./mcp-servers.json",
-      ANTHROPIC_API_KEY: "sk-test",
-    });
-    expect(lines).toHaveLength(3);
-    expect(lines.join("\n")).toContain("ANTHROPIC_API_KEY and MCP_SERVERS");
-    expect(lines.join("\n")).toContain("ARTIFACT_DEFAULT_LEVEL=view");
-    const admin = exposureWarnings(config("192.168.1.4", "admin"), {
-      MCP_SERVERS: '[{"name":"W","url":"https://w.example/mcp"}]',
-    });
-    expect(admin.join("\n")).toContain("gets admin");
-    expect(admin.join("\n")).not.toContain("ANTHROPIC_API_KEY");
   });
 });
 

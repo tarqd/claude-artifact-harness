@@ -167,19 +167,22 @@ under `mcp`, frozen.
    watched identity among them.
 
 **Server (`server.ts`)** — the boundary a direct HTTP caller meets. Both
-routes accept only the shell page's own requests (`application/json`, and
-neither a `Sec-Fetch-Site` nor an `Origin` naming another site — a
-cross-site "simple" POST would otherwise run a tool with no dialog, cookie
-or not), require a viewer cookie the request already carries
-(`auth.existingViewer`, which mints nothing: a connector call spends the
-operator's credential, so a bare client with an artifact id is
-`not_granted` rather than a fresh `interact` viewer), require the artifact
-to declare `mcp` and that viewer to be able to interact (`view` →
-`not_granted`), and meter the body against a 512 KiB cap as it streams.
-`/servers` answers the manifest intersected with the directory: a server
-the directory does not know or a `host:` one is omitted; a server that
-fails to list answers with an empty tool set and its auth status. `/call` re-checks the manifest, refuses `host:` servers and
-non-object arguments, holds at most 8 calls per viewer and 64 in flight
+routes accept only the shell page's own requests, and only from a browser
+it has already seated (`fromShellSession`): `application/json`, neither a
+`Sec-Fetch-Site` nor an `Origin` naming another site — a cross-site
+"simple" POST would otherwise run a tool with no dialog, cookie or not —
+and a viewer cookie the request already carries (`auth.existingViewer`,
+which mints nothing: a connector call spends the operator's credential, so
+a bare client with an artifact id is `not_granted` rather than a fresh
+`interact` viewer). All three run before the body is read, so a caller
+with no session never has half a megabyte buffered for it. Then the
+artifact must declare `mcp` and that viewer must be able to interact
+(`view` → `not_granted`), and the body is metered against a 512 KiB cap as
+it streams. `/servers` answers the manifest intersected with the
+directory: a server the directory does not know or a `host:` one is
+omitted; a server that fails to list answers with an empty tool set and
+its auth status. `/call` re-checks the manifest, refuses `host:` servers
+and non-object arguments, holds at most 8 calls per viewer and 64 in flight
 server-wide (`rate_limited`), gives a call 120 s and aborts it when the
 client goes away, refuses a result over 4 MB, and maps every failure to a
 page code and a status. Results go back as the connector produced them:
