@@ -48,10 +48,22 @@ describe("GET /login?next=", () => {
       { redirect: "manual" },
     );
     expect(response.status).toBe(302);
-    // The Location is the fully-resolved URL that was actually validated
-    // (`target.href`), not the raw `next` string handed back verbatim — see
-    // the CRLF-smuggling regression below for why that distinction matters.
-    expect(response.headers.get("location")).toBe(`${server.shellOrigin}/a/xyz`);
+    // The Location is root-relative — derived from the validated URL's
+    // pathname/search/hash, not `target.href` — so a proxy-fronted or
+    // differently-hosted deployment isn't sent to the shell's internal
+    // origin. See the CRLF-smuggling regression below for why deriving it
+    // from the validated URL (rather than the raw `next` string) matters.
+    expect(response.headers.get("location")).toBe("/a/xyz");
+  });
+
+  it("redirects to a root-relative Location for a legitimate next=", async () => {
+    const next = "/a/xyz?q=1#h";
+    const response = await fetch(
+      `${server.shellOrigin}/login?token=${OWNER_TOKEN}&next=${encodeURIComponent(next)}`,
+      { redirect: "manual" },
+    );
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("/a/xyz?q=1#h");
   });
 
   it.each([
@@ -73,23 +85,20 @@ describe("GET /login?next=", () => {
     expect(await response.text()).toBe("logged in as the owner");
   });
 
-  it("resolves a `..`-escaping path same-origin, as a safe absolute Location", async () => {
-    // `new URL("/..//evil.com", shellOrigin)` resolves *same-origin*
-    // (leading "/" makes it an absolute-path reference against the shell's
-    // own host, not a new authority) but its `.pathname` alone is
+  it("rejects a `..`-escaping path whose pathname resolves protocol-relative", async () => {
+    // `new URL("/..//evil.com", shellOrigin)` resolves *same-origin* on
+    // `.origin` (leading "/" makes it an absolute-path reference against the
+    // shell's own host, not a new authority), but its `.pathname` alone is
     // `//evil.com` — protocol-relative if ever sent bare as a Location
-    // header. Redirecting with `target.href` (the full absolute URL) rather
-    // than reassembling from `.pathname` keeps this safe: the browser gets
-    // an absolute, same-origin Location, never a protocol-relative one.
+    // header. Since the Location is now built from `.pathname` (root-relative,
+    // not `target.href`), this must be rejected rather than redirected to.
     const next = "/..//evil.com";
     const response = await fetch(
       `${server.shellOrigin}/login?token=${OWNER_TOKEN}&next=${encodeURIComponent(next)}`,
       { redirect: "manual" },
     );
-    expect(response.status).toBe(302);
-    const location = response.headers.get("location") ?? "";
-    expect(location.startsWith(server.shellOrigin)).toBe(true);
-    expect(location.startsWith("//")).toBe(false);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("logged in as the owner");
   });
 
   it("still refuses an invalid token regardless of next=", async () => {
@@ -125,11 +134,25 @@ describe("resolveNextRedirect", () => {
     // always is (`"http://host"`). Comparing the un-normalized string against
     // a parsed URL's origin would never match on the default port, silently
     // dropping every next= — including this legitimate same-origin one.
-    expect(resolveNextRedirect("/a/xyz", "http://localhost:80")).toBe("http://localhost/a/xyz");
+    expect(resolveNextRedirect("/a/xyz", "http://localhost:80")).toBe("/a/xyz");
   });
 
   it("still rejects an off-origin next= once the shell origin is normalized", () => {
     expect(resolveNextRedirect("https://evil.com", "http://localhost:80")).toBeNull();
+  });
+
+  it("returns a root-relative Location, not the internal shell origin", () => {
+    // A proxy-fronted or differently-hosted deployment must not redirect the
+    // browser to the shell's internal `http://host:port` origin.
+    expect(resolveNextRedirect("/a/xyz?q=1#h", "http://localhost:80")).toBe("/a/xyz?q=1#h");
+  });
+
+  it("rejects a next= whose validated pathname is protocol-relative", () => {
+    expect(resolveNextRedirect("/..//evil.com", "http://localhost:80")).toBeNull();
+  });
+
+  it("never throws for a malformed shell origin", () => {
+    expect(resolveNextRedirect("/a/xyz", "not a url")).toBeNull();
   });
 });
 

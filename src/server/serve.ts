@@ -275,13 +275,28 @@ function artifactIdFrom(host: string | undefined, header: string | undefined): s
  */
 export function resolveNextRedirect(next: string, shellOrigin: string): string | null {
   let target: URL;
+  let normalizedShellOrigin: string;
   try {
     target = new URL(next, shellOrigin);
+    normalizedShellOrigin = new URL(shellOrigin).origin;
   } catch {
     return null;
   }
-  const normalizedShellOrigin = new URL(shellOrigin).origin;
-  return target.origin === normalizedShellOrigin ? target.href : null;
+  if (target.origin !== normalizedShellOrigin) return null;
+  // Emit a root-relative Location rather than `target.href`: an absolute
+  // URL would carry the shell's *internal* origin (e.g. `http://host:port`)
+  // straight into the browser, which is wrong behind a proxy or a
+  // differently-hosted deployment. Clear any embedded credentials first —
+  // they're meaningless in a relative Location but shouldn't be echoed.
+  target.username = "";
+  target.password = "";
+  const rel = target.pathname + target.search + target.hash;
+  // A single leading "/" followed by anything but another "/" or "\": this
+  // rejects `//evil.com` and `/\evil.com`-shaped pathnames (e.g. from
+  // `next=/..//evil.com`, whose `.pathname` is `//evil.com`) that would
+  // otherwise become a protocol-relative Location.
+  if (!/^\/(?![\/\\])/.test(rel)) return null;
+  return rel;
 }
 
 export function mountShellRoutes(app: Hono, ctx: ServerContext): void {

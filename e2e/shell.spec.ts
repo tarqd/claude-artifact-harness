@@ -69,7 +69,8 @@ test("the preamble strips __frame_t from the embedded frame's own URL", async ({
   // (queried via Playwright's `Frame`, which tracks the child document's
   // real navigation state) is the "after" half.
   const iframeSrc = await page.locator("iframe#frame-content").getAttribute("src");
-  expect(new URL(iframeSrc ?? "", server.shellOrigin).searchParams.has("__frame_t")).toBe(true);
+  const originalUrl = new URL(iframeSrc ?? "", server.shellOrigin);
+  expect(originalUrl.searchParams.has("__frame_t")).toBe(true);
 
   const frames = page.frames().filter((f) => f !== page.mainFrame());
   expect(frames).toHaveLength(1);
@@ -81,4 +82,9 @@ test("the preamble strips __frame_t from the embedded frame's own URL", async ({
   await expect
     .poll(() => frameEl.evaluate(() => location.search))
     .not.toContain("__frame_t");
+  // The strip must touch only `search`: confirm the path (`/_f/<ver>/...`,
+  // taken from the original `src`) is still exactly what it was, so a
+  // regression that rewrote the path along with stripping the token would
+  // be caught here too.
+  expect(await frameEl.evaluate(() => location.pathname)).toBe(originalUrl.pathname);
 });
