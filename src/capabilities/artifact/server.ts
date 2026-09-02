@@ -36,8 +36,11 @@ function decodeFiles(input: unknown): PublishInput["files"] {
 }
 
 export function routes(apps: ServerApps, ctx: ServerContext): void {
-  // Mirrors the store's own HTML/version ceiling: refused before
-  // `c.req.json()` buffers a body that could never publish anyway.
+  // Sized off the *encoded* wire form, not the store's decoded ceiling: a
+  // files publish carries content base64 (4/3 blowup) plus a JSON envelope,
+  // so a version at the store's 16 MiB budget needs well over 16 MiB on the
+  // wire. Refused before `c.req.json()` buffers a body that could never
+  // publish anyway.
   apps.shell.use("/api/frame/self/*", maxBodySize(PUBLISH_BODY_LIMIT));
 
   apps.shell.post("/api/frame/self/:id", async (c) => {

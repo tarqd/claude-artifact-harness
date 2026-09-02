@@ -235,13 +235,12 @@ function validateWhere(clause: unknown): WhereClause {
       INVALID(`the ${op} operator takes at most ${MAX_IN_VALUES} values`);
     }
   }
-  let serializedValue: string | undefined;
-  try {
-    serializedValue = JSON.stringify(raw.v);
-  } catch {
-    INVALID("a filter value must be plain JSON");
-  }
-  if (Buffer.byteLength(serializedValue ?? "") > MAX_WHERE_VALUE_BYTES) {
+  // `raw.v` only ever reaches here as `JSON.parse` output (or `undefined`,
+  // for an unset field), so it can never be circular or hold a BigInt:
+  // `JSON.stringify` cannot throw on it. `?? ""` covers the `undefined` case,
+  // where `stringify` itself returns `undefined` rather than a string.
+  const serializedValue = JSON.stringify(raw.v) ?? "";
+  if (Buffer.byteLength(serializedValue) > MAX_WHERE_VALUE_BYTES) {
     INVALID(`a filter value is larger than ${MAX_WHERE_VALUE_BYTES} bytes`);
   }
   return { f: raw.f as string, op, v: raw.v };

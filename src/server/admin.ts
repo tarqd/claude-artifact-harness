@@ -9,7 +9,7 @@
 import type { Context, Hono } from "hono";
 import { isCapError, toCapError } from "../protocol/errors.ts";
 import { isArtifactId } from "../protocol/paths.ts";
-import { maxBodySize, PUBLISH_BODY_LIMIT } from "./body-limit.ts";
+import { ADMIN_PUBLISH_BODY_LIMIT, maxBodySize } from "./body-limit.ts";
 import type { ServerContext } from "./types.ts";
 
 interface CreateBody {
@@ -36,11 +36,12 @@ function readCapabilities(value: unknown): Record<string, { config?: unknown }> 
 export function mountAdminApi(app: Hono, ctx: ServerContext): void {
   const guard = (c: Context): boolean => ctx.auth.isAdminRequest(c);
 
-  // The two write routes carry a whole HTML document (and, for publish,
-  // every carried file): refused before `c.req.json()` buffers a body that
-  // could never pass `store.createArtifact`/`store.publish` anyway.
-  app.use("/api/artifacts", maxBodySize(PUBLISH_BODY_LIMIT));
-  app.use("/api/artifacts/:id/publish", maxBodySize(PUBLISH_BODY_LIMIT));
+  // The two write routes carry a whole HTML document (no `files`, unlike
+  // the frame's self-publish route): refused before `c.req.json()` buffers
+  // a body that could never pass `store.createArtifact`/`store.publish`
+  // anyway.
+  app.use("/api/artifacts", maxBodySize(ADMIN_PUBLISH_BODY_LIMIT));
+  app.use("/api/artifacts/:id/publish", maxBodySize(ADMIN_PUBLISH_BODY_LIMIT));
 
   app.post("/api/artifacts", async (c) => {
     if (!guard(c)) return c.json({ code: "not_writer", message: "owner only" }, 403);

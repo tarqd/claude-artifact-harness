@@ -27,6 +27,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { join } from "node:path";
 import { isCapError } from "../../protocol/errors.ts";
 import { isArtifactId, isBlobId } from "../../protocol/paths.ts";
+import { DEFAULT_FRAME_BODY_LIMIT, maxBodySize } from "../../server/body-limit.ts";
 import type { ArtifactMeta } from "../../server/store.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import type { Context } from "hono";
@@ -452,6 +453,12 @@ function failure(c: Context, err: unknown): Response {
 
 export function routes(apps: ServerApps, ctx: ServerContext): void {
   const blobs = new BlobStore(ctx.config.dataDir);
+
+  // `/upload` has its own streaming cap (`readCappedBody`, sized per content
+  // type below); the two small JSON routes get the same pre-parse guard
+  // every other frame JSON route does.
+  apps.shell.use("/api/frame/blob/:id/list", maxBodySize(DEFAULT_FRAME_BODY_LIMIT));
+  apps.shell.use("/api/frame/blob/:id/:blobId/delete", maxBodySize(DEFAULT_FRAME_BODY_LIMIT));
 
   apps.shell.post("/api/frame/blob/:id/upload", async (c) => {
     const resolved = await gate(c, ctx);
