@@ -164,4 +164,24 @@ describe("broker dispatch", () => {
     );
     expect(reply.error).toMatchObject({ code: "conflict", live: "v9" });
   });
+
+  it("hides a non-CapError throw behind a fixed message and logs the real one", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const ctx = context({
+        api: vi.fn(async () => {
+          throw new Error("ENOENT: no such file or directory, open '/srv/secret/path'");
+        }) as BrokerContext["api"],
+      });
+      const reply = await dispatch(
+        { cap: "artifact", id: "s5", method: "publish", args: ["<!doctype html>"] },
+        ctx,
+      );
+      expect(reply.error).toEqual({ code: "upstream_error", message: "internal error" });
+      // The real error still reaches the shell's own log, just not the frame.
+      expect(spy.mock.calls.some((call) => String(call).includes("/srv/secret/path"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

@@ -160,6 +160,15 @@ describe("the final filename", () => {
     expect(sanitizeFilename("a\u0000b\u001fc\u007f.txt")).toBe("abc.txt");
   });
 
+  it("strips Unicode format characters before the extension is read", () => {
+    // U+202E (RLO) makes a browser render "report\u202egnp.html" as
+    // "reportlmth.png"; stripped, the extension check sees the real name.
+    expect(sanitizeFilename("report\u202egnp.html")).toBe("reportgnp.html");
+    expect(extensionOf(sanitizeFilename("report\u202egnp.html"))).toBe("html");
+    // A zero-width space hidden between a real and a fake extension.
+    expect(sanitizeFilename("safe.png\u200b.html")).toBe("safe.png.html");
+  });
+
   it.each([
     ["report", "no extension at all"],
     [".csv", "an extension with no name"],

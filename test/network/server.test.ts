@@ -22,6 +22,11 @@ const SHELL = "http://shell.test:8787";
 const DECLARED = "https://declared.example";
 const BLOB_HEADERS = { "content-security-policy": "default-src 'none'; sandbox" };
 
+// A neutral shell origin and frame suffix, unrelated to any declared test
+// origin, for the pure-function tests below.
+const TEST_SHELL = "https://shell.example";
+const TEST_FRAME_SUFFIX = "artifacts.example";
+
 describe("normalizeOrigin", () => {
   it("keeps absolute https origins, normalised", () => {
     expect(normalizeOrigin("https://api.example.com")).toBe("https://api.example.com");
@@ -71,49 +76,99 @@ describe("normalizeOrigin", () => {
 describe("validateOrigins", () => {
   it("drops the invalid entries and keeps the rest in order", () => {
     expect(
-      validateOrigins([
-        "https://a.example",
-        "http://b.example",
-        "https://c.example/path",
-        "nonsense",
-        "https://d.example",
-      ]),
+      validateOrigins(
+        [
+          "https://a.example",
+          "http://b.example",
+          "https://c.example/path",
+          "nonsense",
+          "https://d.example",
+        ],
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
     ).toEqual(["https://a.example", "https://d.example"]);
   });
 
   it("de-duplicates after normalisation", () => {
     expect(
-      validateOrigins(["https://a.example", "https://A.example/", "https://a.example:443"]),
+      validateOrigins(
+        ["https://a.example", "https://A.example/", "https://a.example:443"],
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
     ).toEqual(["https://a.example"]);
   });
 
   it("answers [] for anything that is not an array", () => {
     for (const bad of [undefined, null, "https://a.example", 7, {}]) {
-      expect(validateOrigins(bad as unknown)).toEqual([]);
+      expect(validateOrigins(bad as unknown, TEST_SHELL, TEST_FRAME_SUFFIX)).toEqual([]);
     }
   });
 
   it("caps the list", () => {
     const many = Array.from({ length: MAX_ORIGINS + 10 }, (_, i) => `https://h${i}.example`);
-    expect(validateOrigins(many)).toHaveLength(MAX_ORIGINS);
+    expect(validateOrigins(many, TEST_SHELL, TEST_FRAME_SUFFIX)).toHaveLength(MAX_ORIGINS);
+  });
+
+  it("drops the shell's own origin and sibling frame origins", () => {
+    // The shell host itself, case-insensitively...
+    expect(
+      validateOrigins(["https://SHELL.example", "https://ok.example"], TEST_SHELL, TEST_FRAME_SUFFIX),
+    ).toEqual(["https://ok.example"]);
+    // ...a same-host, different-port origin (cookies are not port-scoped)...
+    expect(
+      validateOrigins(["https://shell.example:8443", "https://ok.example"], TEST_SHELL, TEST_FRAME_SUFFIX),
+    ).toEqual(["https://ok.example"]);
+    // ...and any sibling artifact's frame origin under the frame host suffix.
+    expect(
+      validateOrigins(
+        ["https://abc123.artifacts.example", "https://ok.example"],
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
+    ).toEqual(["https://ok.example"]);
+    // ...and the bare frame host suffix itself, case-insensitively — an
+    // artifact can be served at that host directly, not only at a subdomain.
+    expect(
+      validateOrigins(
+        ["https://ARTIFACTS.example", "https://ok.example"],
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
+    ).toEqual(["https://ok.example"]);
+    // An unrelated https origin is kept.
+    expect(validateOrigins(["https://unrelated.example"], TEST_SHELL, TEST_FRAME_SUFFIX)).toEqual([
+      "https://unrelated.example",
+    ]);
   });
 });
 
 describe("connectSrcOrigins", () => {
   it("reads the declaration", () => {
     expect(
-      connectSrcOrigins({ network: { config: { origins: ["https://a.example"] } } }),
+      connectSrcOrigins(
+        { network: { config: { origins: ["https://a.example"] } } },
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
     ).toEqual(["https://a.example"]);
   });
 
   it("answers [] when network was not declared or is malformed", () => {
-    expect(connectSrcOrigins(undefined)).toEqual([]);
-    expect(connectSrcOrigins({})).toEqual([]);
-    expect(connectSrcOrigins({ network: {} })).toEqual([]);
-    expect(connectSrcOrigins({ network: { config: null } })).toEqual([]);
-    expect(connectSrcOrigins({ network: { config: { origins: "https://a.example" } } })).toEqual(
+    expect(connectSrcOrigins(undefined, TEST_SHELL, TEST_FRAME_SUFFIX)).toEqual([]);
+    expect(connectSrcOrigins({}, TEST_SHELL, TEST_FRAME_SUFFIX)).toEqual([]);
+    expect(connectSrcOrigins({ network: {} }, TEST_SHELL, TEST_FRAME_SUFFIX)).toEqual([]);
+    expect(connectSrcOrigins({ network: { config: null } }, TEST_SHELL, TEST_FRAME_SUFFIX)).toEqual(
       [],
     );
+    expect(
+      connectSrcOrigins(
+        { network: { config: { origins: "https://a.example" } } },
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
+    ).toEqual([]);
   });
 
   it("opens nothing for an optional declaration", () => {
@@ -121,10 +176,45 @@ describe("connectSrcOrigins", () => {
     // is no later grant path, so the page never gets the namespace; the
     // policy must not hand it a reach the view was not granted.
     expect(
-      connectSrcOrigins({
-        network: { config: { optional: true, origins: ["https://a.example"] } },
-      }),
+      connectSrcOrigins(
+        { network: { config: { optional: true, origins: ["https://a.example"] } } },
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
     ).toEqual([]);
+  });
+
+  it("drops an origin that would be the shell or a sibling frame", () => {
+    expect(
+      connectSrcOrigins(
+        { network: { config: { origins: [TEST_SHELL, "https://a.example"] } } },
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
+    ).toEqual(["https://a.example"]);
+    expect(
+      connectSrcOrigins(
+        {
+          network: {
+            config: { origins: [`https://x.${TEST_FRAME_SUFFIX}`, "https://a.example"] },
+          },
+        },
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
+    ).toEqual(["https://a.example"]);
+    // The bare frame host suffix itself, not only a subdomain of it.
+    expect(
+      connectSrcOrigins(
+        {
+          network: {
+            config: { origins: [`https://${TEST_FRAME_SUFFIX}`, "https://a.example"] },
+          },
+        },
+        TEST_SHELL,
+        TEST_FRAME_SUFFIX,
+      ),
+    ).toEqual(["https://a.example"]);
   });
 });
 
@@ -230,6 +320,19 @@ describe("the CSP the frame origin serves", () => {
     expect(policy.split(";").filter((d) => d.trim().startsWith("script-src"))).toHaveLength(1);
   });
 
+  it("drops a declared origin that is the shell itself or a sibling frame", async () => {
+    // This deployment's shell host and frame host suffix are both
+    // "localhost" (the dev default), so both same-site cases show up as one
+    // host: the shell's own origin, and a sibling artifact's frame origin.
+    const id = await create({
+      network: {
+        origins: ["https://localhost", "https://abc123.localhost", "https://unrelated.example"],
+      },
+    });
+    const policy = await policyFor(id);
+    expect(connectSrc(policy)).toBe("connect-src 'self' https://unrelated.example");
+  });
+
   it("serves the validated subset, not the declaration", async () => {
     // The served header and the helper agree — the gap the slice used to
     // document (the spine's own string filter) is closed for the response
@@ -237,9 +340,13 @@ describe("the CSP the frame origin serves", () => {
     const declared = ["https://good.example", "http://insecure.example"];
     const id = await create({ network: { origins: declared } });
     expect(connectSrc(await policyFor(id))).toBe("connect-src 'self' https://good.example");
-    expect(connectSrcOrigins({ network: { config: { origins: declared } } })).toEqual([
-      "https://good.example",
-    ]);
+    expect(
+      connectSrcOrigins(
+        { network: { config: { origins: declared } } },
+        server.shellOrigin,
+        server.config.frameHostSuffix,
+      ),
+    ).toEqual(["https://good.example"]);
   });
 
   it("cannot be made to inject a directive that shadows a real one", async () => {

@@ -375,8 +375,10 @@ export class DbStore {
         updatedAt: new Date().toISOString(),
         ...(existing?.lease ? { lease: existing.lease } : {}),
       };
-      db.docs.set(path, doc);
+      // Persist before touching the index: a failed write must leave the
+      // index (and the quota it feeds) exactly as it was.
       await this.persist(artifactId, doc);
+      db.docs.set(path, doc);
       this.emit(artifactId, [path]);
       return doc;
     });
@@ -399,8 +401,10 @@ export class DbStore {
         updatedAt: new Date().toISOString(),
         ...(existing.lease ? { lease: existing.lease } : {}),
       };
-      db.docs.set(path, doc);
+      // Persist before touching the index: a failed write must leave the
+      // index exactly as it was.
       await this.persist(artifactId, doc);
+      db.docs.set(path, doc);
       this.emit(artifactId, [path]);
       return doc;
     });
@@ -410,8 +414,9 @@ export class DbStore {
     if (!isDocumentPath(path)) INVALID(`"${path}" is not a document path`);
     const db = await this.load(artifactId);
     await this.withLock(artifactId, async () => {
-      const existed = db.docs.delete(path);
+      // Unlink before touching the index, for the same reason as set/update.
       await this.unlink(artifactId, path);
+      const existed = db.docs.delete(path);
       // Idempotent, but only a real removal is worth waking subscribers for.
       if (existed) this.emit(artifactId, [path]);
     });
@@ -463,8 +468,9 @@ export class DbStore {
         updatedAt: new Date(now).toISOString(),
         lease: { holder: options.holder, expiresAt },
       };
-      db.docs.set(path, doc);
+      // Persist before touching the index, for the same reason as set/update.
       await this.persist(artifactId, doc);
+      db.docs.set(path, doc);
       this.emit(artifactId, [path]);
       return {
         acquired: true,

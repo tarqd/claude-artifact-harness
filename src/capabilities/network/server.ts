@@ -95,15 +95,48 @@ export function normalizeOrigin(value: unknown): string | null {
 }
 
 /**
- * The declared list → the `connect-src` sources to add beyond `'self'`:
- * validated, normalised, de-duplicated, order preserved, capped.
+ * A declared origin whose host is the shell's own host, or a sibling
+ * artifact's frame host (anything under `frameHostSuffix`), is same-site
+ * with the viewer's cookie even though it parses as a fine `https:` origin.
+ * Letting it through `connect-src` would let an author-declared origin reach
+ * `/api/frame/*` (or another artifact's frame) from inside this frame with
+ * that cookie attached — the same-site-CSRF half of the Host/Origin finding.
+ * Host only, case-insensitively: cookies are not port-scoped, so a same
+ * host on a different port is exactly as reachable. The suffix itself is a
+ * live frame host too (an artifact can be served at the bare suffix, not
+ * only at a subdomain of it), so it is checked alongside `.<suffix>`, not
+ * only as a parent of it.
  */
-export function validateOrigins(value: unknown): string[] {
+function isSameSite(host: string, shellHost: string, frameHostSuffix: string): boolean {
+  const h = host.toLowerCase();
+  const suffix = frameHostSuffix.toLowerCase();
+  if (h === shellHost.toLowerCase()) return true;
+  if (h === suffix) return true;
+  return h.endsWith(`.${suffix}`);
+}
+
+/**
+ * The declared list → the `connect-src` sources to add beyond `'self'`:
+ * validated, normalised, de-duplicated, order preserved, capped, and with
+ * the shell's own origin and sibling frame origins dropped (`isSameSite`).
+ */
+export function validateOrigins(
+  value: unknown,
+  shellOrigin: string,
+  frameHostSuffix: string,
+): string[] {
   if (!Array.isArray(value)) return [];
+  let shellHost = "";
+  try {
+    shellHost = new URL(shellOrigin).hostname;
+  } catch {
+    /* an unparsable shell origin matches nothing, rather than everything */
+  }
   const out: string[] = [];
   for (const entry of value) {
     const origin = normalizeOrigin(entry);
     if (origin === null || out.includes(origin)) continue;
+    if (isSameSite(new URL(origin).hostname, shellHost, frameHostSuffix)) continue;
     out.push(origin);
     if (out.length >= MAX_ORIGINS) break;
   }
@@ -122,10 +155,12 @@ export function validateOrigins(value: unknown): string[] {
  */
 export function connectSrcOrigins(
   capabilities: Record<string, { config?: unknown }> | undefined,
+  shellOrigin: string,
+  frameHostSuffix: string,
 ): string[] {
   const config = capabilities?.network?.config;
   if (typeof config !== "object" || config === null || Array.isArray(config)) return [];
   const record = config as { optional?: unknown; origins?: unknown };
   if (record.optional === true) return [];
-  return validateOrigins(record.origins);
+  return validateOrigins(record.origins, shellOrigin, frameHostSuffix);
 }

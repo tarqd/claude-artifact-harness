@@ -224,6 +224,20 @@ describe("the call endpoint", () => {
     });
     expect(second.body).toEqual({ acquired: false, expiresAt: expect.any(String) });
   });
+
+  it("hides the data directory when a persist call fails", async () => {
+    const id = await createArtifact({ db: {} });
+    const viewer = new Client();
+    // Two 200-byte segments encode to a filename past NAME_MAX (255 bytes on
+    // ext4/most Linux filesystems), so the underlying `fs/promises` write
+    // rejects with a raw Node error carrying the absolute DATA_DIR path.
+    const path = `${"x".repeat(200)}/${"x".repeat(200)}`;
+    const result = await viewer.call(id, { verb: "set", path, body: { v: 1 } });
+    expect(result.status).toBe(503);
+    expect(result.body.code).toBe("unavailable");
+    expect(result.body.message).not.toContain(dataDir);
+    expect(result.body.message).not.toMatch(/ENOENT|ENAMETOOLONG|EACCES|\//);
+  });
 });
 
 describe("the realtime lane", () => {
