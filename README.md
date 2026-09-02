@@ -204,6 +204,24 @@ separate ESM bundles, dynamically imported from `/_runtime/<name>.js`, so
 there is nothing for a separate loader to link), and `src/frame/index.ts` is
 the compile-time surface a capability module imports.
 
+## Automation
+
+Two GitHub Actions workflows run Claude against this repository:
+
+- `.github/workflows/claude-code-review.yml` reviews every non-draft pull
+  request when it opens and on each push, weighted toward the isolation and
+  trust boundaries the shell depends on. Findings land as inline comments plus
+  one sticky summary comment that is rewritten rather than duplicated.
+- `.github/workflows/claude.yml` responds to `@claude` in an issue, an issue
+  comment, a PR review comment or a review body, and pushes a branch when the
+  ask is a code change.
+
+Both need the [Claude GitHub app](https://github.com/apps/claude) installed on
+the repository and an `ANTHROPIC_API_KEY` repository secret. To bill a Claude
+Pro/Max subscription instead, run `claude setup-token`, store the result as
+`CLAUDE_CODE_OAUTH_TOKEN`, and swap the `anthropic_api_key:` line in each
+workflow for `claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`.
+
 ## Documentation
 
 - `docs/design.md`: the plan this implements.

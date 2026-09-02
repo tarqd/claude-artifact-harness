@@ -1,0 +1,88 @@
+name: Claude Code Review
+
+# Automatic review on every non-draft PR, refreshed on each push.
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+# A new push supersedes the review of the commit it replaced.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Swap for `claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`
+          # to bill a Claude Pro/Max subscription instead of an API key.
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # One comment per PR, rewritten on each push, instead of a new one
+          # per commit.
+          use_sticky_comment: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The PR branch is already checked out in
+            the working directory; `gh pr diff` gives you the diff against the
+            base.
+
+            This repository is a self-hosted compatibility layer for Claude
+            Artifacts: a sandboxed-iframe shell that brokers `window.claude`
+            capability calls over a postMessage protocol. `README.md` and
+            `docs/design.md` describe the architecture, and each capability
+            slice documents its own boundaries in
+            `src/capabilities/<name>/README.md`. Read what the change touches
+            before judging it.
+
+            Weight the review toward, in order:
+
+            1. Correctness — logic that does not do what the surrounding code
+               and its slice README say it should, and broken or missing
+               handling of the protocol's error cases.
+            2. Isolation and trust boundaries — this is the part of the repo
+               where a bug is a vulnerability. Frame-to-shell messages are
+               untrusted input: check origin and artifact-id validation,
+               capability declaration and consent checks, the `db`
+               `data/users/{self}` privacy rules, CSP and `connect-src`
+               construction from `network` origins, blob serving from the
+               frame origin only, and anything that lets one artifact reach
+               another's data.
+            3. Contract fidelity — deviations from
+               `reference/contract/0.2.32/` and `docs/surface-area.md` that
+               are not deliberate and documented as such.
+            4. Test coverage — a behavior change in a slice with no
+               corresponding change under `test/<name>/` or `e2e/`.
+            5. Structure — a slice reaching outside
+               `src/capabilities/<name>/`, `test/<name>/` and
+               `fixtures/<name>*.html`, other than the spine files the layout
+               section of `README.md` names.
+
+            Match the existing code's conventions; do not propose
+            reformatting, renaming, or restructuring that the change did not
+            already touch. Skip nits and style preferences entirely.
+
+            Report only issues you can point at a specific line for and
+            explain the concrete failure of. If the diff is clean, say so in
+            one line rather than inventing findings.
+
+            Post feedback on GitHub, not as message text: `gh pr comment` for
+            the summary, and
+            `mcp__github_inline_comment__create_inline_comment` (with
+            `confirmed: true`) for line-specific findings.
+          claude_args: |
+            --max-turns 30
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
