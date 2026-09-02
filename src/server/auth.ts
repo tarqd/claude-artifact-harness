@@ -50,20 +50,33 @@ export class Auth {
     return value;
   }
 
-  /** Read the viewer cookie, minting and setting one when absent. */
-  viewer(c: Context): Viewer {
-    const existing = this.unseal(getCookie(c, VIEWER_COOKIE));
-    const id = isUserId(existing) ? existing : mintUserId();
-    if (id !== existing) {
-      setCookie(c, VIEWER_COOKIE, this.seal(id), {
-        path: "/",
-        httpOnly: true,
-        sameSite: "Lax",
-        maxAge: 60 * 60 * 24 * 365,
-      });
-    }
+  /**
+   * The viewer this request already carries, or `null`. Nothing is minted and
+   * no cookie is set: an API lane must not hand an identity to a caller it is
+   * about to refuse, and what it meters should be an id this server signed.
+   * That is a rule about the lane, not a barrier around it — the cookie is
+   * free to anyone who can GET `/a/:id`, which is where identities are minted.
+   */
+  existingViewer(c: Context): Viewer | null {
+    const id = this.unseal(getCookie(c, VIEWER_COOKIE));
+    if (!isUserId(id)) return null;
     const owner = this.unseal(getCookie(c, OWNER_COOKIE));
     return { id, isOwner: owner === id };
+  }
+
+  /** Read the viewer cookie, minting and setting one when absent. */
+  viewer(c: Context): Viewer {
+    const existing = this.existingViewer(c);
+    if (existing) return existing;
+    const id = mintUserId();
+    setCookie(c, VIEWER_COOKIE, this.seal(id), {
+      path: "/",
+      httpOnly: true,
+      sameSite: "Lax",
+      maxAge: 60 * 60 * 24 * 365,
+    });
+    // A fresh identity is nobody's owner: the owner cookie names another id.
+    return { id, isOwner: false };
   }
 
   /** `/login?token=<ARTIFACT_OWNER_TOKEN>` promotes this browser to owner. */
