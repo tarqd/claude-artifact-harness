@@ -35,8 +35,9 @@ a plain host (no wildcard, no IPv6 literal). Survivors are re-emitted from
 `URL.origin` — never passed through — then de-duplicated and capped at
 `MAX_ORIGINS` (32). This is what stops `"https://a.example; script-src *"`
 from becoming a second CSP directive of the author's choosing. A survivor
-whose host is the shell's own host, or a sibling artifact's frame host
-(anything under `frameHostSuffix`), is dropped too: same-site with the
+whose host is the shell's own host, the bare `frameHostSuffix` itself, or a
+sibling artifact's frame host (anything under `frameHostSuffix`), is dropped
+too: same-site with the
 viewer's cookie, it would let a declared `connect-src` reach `/api/frame/*`
 (or another artifact's frame) from inside this frame.
 
