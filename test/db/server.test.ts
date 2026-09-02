@@ -55,11 +55,15 @@ async function createArtifact(capabilities: Record<string, unknown>): Promise<st
   return body.id;
 }
 
+/** Longer than the lane's PUSH_COALESCE_MS, so an armed push has landed. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 50));
+}
+
 /** A lane client that queues what the server pushes. */
 class Lane {
   private readonly queue: any[] = [];
   private waiting: ((value: any) => void) | null = null;
-  private lastRows = "";
   readonly socket: WebSocket;
 
   constructor(artifactId: string, cookie: string, origin?: string) {
@@ -89,24 +93,6 @@ class Lane {
     return new Promise((resolve) => {
       this.waiting = resolve;
     });
-  }
-
-  /**
-   * The next delivery that is not a repeat of the row set just delivered.
-   * The lane pushes the current rows, not a delta, so a write coalesced
-   * just before this subscription started can repeat a snapshot the client
-   * already holds. The broker diffs that away; a test must not read it as
-   * the answer to the next write.
-   */
-  async nextRows(): Promise<any> {
-    for (;;) {
-      const message = await this.next();
-      if (message.kind !== "rows") return message;
-      const rows = JSON.stringify(message.docs);
-      if (rows === this.lastRows) continue;
-      this.lastRows = rows;
-      return message;
-    }
   }
 
   send(message: unknown): void {
@@ -269,6 +255,26 @@ describe("a rule declaration that does not compile", () => {
     expect(refused.body.code).toBe("invalid_content");
     expect(refused.body.message).toMatch(/db: rule 1: "bad path!" is not a rule path/);
 
+    // A `rules` that is present but is not a list of rules is refused too:
+    // double-encoding leaves a JSON string there, which used to read as "no
+    // declaration" and run the permissive defaults.
+    for (const rules of ['[{"path":"","read":"view","write":"owner"}]', { 0: { path: "" } }]) {
+      const encoded = await create({ db: { config: { rules } } });
+      expect(encoded.status).toBe(400);
+      expect(encoded.body.message).toMatch(/db: rules must be an array of rule objects/);
+    }
+    const noLevel = await create({ db: { config: { rules: [{ path: "", raed: "owner" }] } } });
+    expect(noLevel.status).toBe(400);
+    expect(noLevel.body.message).toMatch(/db: rule 0: a rule must set read, write, or both/);
+
+    // A declared-but-configless db is untouched by any of this.
+    const plain = await create({ db: {} });
+    expect(plain.status).toBe(200);
+    const anyone = new Client();
+    expect(
+      (await anyone.call(plain.body.id, { verb: "set", path: "t/1", body: { a: 1 } })).status,
+    ).toBe(200);
+
     // The same declaration without the typo is still published and still runs.
     const accepted = await create({
       db: { config: { rules: [{ path: "", read: "view", write: "owner" }] } },
@@ -328,6 +334,28 @@ describe("a rule declaration that does not compile", () => {
     expect((await asOwner({ verb: "set", path: "t/1", body: { a: 1 } })).status).toBe(200);
     expect((await asOwner({ verb: "get", path: "t/1" })).body.data).toEqual({ a: 1 });
   });
+
+  it("closes a stored declaration whose rules are not a list either", async () => {
+    // The reviewer's repro: `rules` double-encoded to a JSON string. It read
+    // as "no declaration", so an anonymous `set` on a store the author had
+    // locked to `owner` came back 200.
+    const meta = await server.context.store.createArtifact({
+      html: HTML,
+      capabilities: { db: { config: { rules: '[{"path":"","read":"view","write":"owner"}]' } } },
+      owner: "u_" + "d".repeat(22),
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const viewer = new Client();
+      const write = await viewer.call(meta.id, { verb: "set", path: "t/1", body: { a: 1 } });
+      expect(write.status).toBe(400);
+      expect(write.body.code).toBe("invalid_argument");
+      expect((await viewer.call(meta.id, { verb: "get", path: "t/1" })).body.exists).toBe(false);
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/rules must be an array of rule objects/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("the realtime lane", () => {
@@ -336,6 +364,11 @@ describe("the realtime lane", () => {
     const alice = new Client();
     const bob = new Client();
     await alice.call(id, { verb: "set", path: "tasks/t1", body: { title: "one" } });
+    // A write arms a PUSH_COALESCE_MS timer whether or not anything is
+    // subscribed yet; let this one fire before the subscription exists, or
+    // it delivers the seed snapshot a second time and the next assertion
+    // reads that repeat as the answer to alice's next write.
+    await settle();
     // Give bob a cookie before the lane handshake needs it.
     await bob.call(id, { verb: "get", path: "tasks/t1" });
 
@@ -350,7 +383,7 @@ describe("the realtime lane", () => {
     await lane.open();
     lane.send({ kind: "sub", subId: "s1", grant: granted.body.grant });
 
-    const first = await lane.nextRows();
+    const first = await lane.next();
     expect(first).toEqual({
       kind: "rows",
       subId: "s1",
@@ -358,12 +391,12 @@ describe("the realtime lane", () => {
     });
 
     await alice.call(id, { verb: "set", path: "tasks/t2", body: { title: "two" } });
-    const second = await lane.nextRows();
+    const second = await lane.next();
     expect(second.kind).toBe("rows");
     expect(second.docs.map((d: { id: string }) => d.id)).toEqual(["t1", "t2"]);
 
     await alice.call(id, { verb: "delete", path: "tasks/t1" });
-    const third = await lane.nextRows();
+    const third = await lane.next();
     expect(third.docs.map((d: { id: string }) => d.id)).toEqual(["t2"]);
 
     lane.close();

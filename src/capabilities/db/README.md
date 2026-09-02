@@ -108,14 +108,23 @@ lane too, and the refresh timer stops as soon as nothing is subscribed.
   to the defaults — the defaults (root `write: "interact"`) are looser than
   any declaration worth writing, so one typo used to open the whole store.
   The view closes instead: root `read: "owner"` / `write: "owner"`, with
-  `data/users/{self}` privacy still in force, so every viewer below the
-  owner reads `exists: false` and writes `invalid_argument` until the
-  declaration is fixed, and the owner can still repair the data. The server
-  logs the compiler's errors once per published version on first touch,
-  because the closure is otherwise invisible from both sides. `POST
+  `data/users/{self}` privacy still in force — and every `{self}` prefix the
+  author did declare carried in level-less alongside it, because `{self}` is
+  the one gate the owner does not pass and a closure may not widen it. Every
+  viewer below the owner reads `exists: false` and writes `invalid_argument`
+  until the declaration is fixed, and the owner can still repair the data.
+  The server logs the compiler's errors once per published version on first
+  touch, because the closure is otherwise invisible from both sides. `POST
   /api/artifacts` refuses such a declaration outright (400
   `invalid_content`, naming the rule), so only an artifact created before
   that check — or written straight to disk — can reach the closed state.
+- "Does not compile" is deliberately wider than a bad rule path. `rules`
+  present but not an array (a double-encoded JSON string, an object) is an
+  error, not an absence — only an absent `rules` asks for the defaults — and
+  a rule that sets neither `read` nor `write` is refused rather than
+  compiled to a no-op, since `{path: "", raed: "owner"}` reads to its author
+  as a locked-down root. The compiler bounds and escapes the path it echoes
+  back, because that message reaches a console and an HTTP response.
 
 ## Deviations from the platform, and why
 

@@ -193,4 +193,90 @@ describe("a declaration that does not compile", () => {
     expect(can(fixed, "t/1", "write", viewer(A, "interact"))).toBe(false);
     expect(can(fixed, "t/1", "write", viewer(A, "owner"))).toBe(true);
   });
+
+  it("keeps the {self} prefixes the author declared, so the owner stays out", () => {
+    // The level gate alone locks out everyone below `owner`; `{self}` is the
+    // gate the owner does not pass either, and a closure must not hand the
+    // owner subtrees the author promised were private.
+    const broken = {
+      rules: [
+        { path: "", read: "view", write: "owner" },
+        { path: "votes/{self}", write: "interact" },
+        { path: "bad path!", read: "view" },
+      ],
+    };
+    expect(compileRules(broken).errors[0]).toMatch(/is not a rule path/);
+    expect(can(broken, `votes/${B}/x`, "read", viewer(A, "owner"))).toBe(false);
+    expect(can(broken, `votes/${B}/x`, "write", viewer(A, "owner"))).toBe(false);
+    // The viewer's own subtree is still gated on the closed level, so only
+    // the owner reads their own, and nobody below `owner` reads anything.
+    expect(can(broken, `votes/${A}/x`, "read", viewer(A, "owner"))).toBe(true);
+    expect(can(broken, `votes/${A}/x`, "read", viewer(A, "interact"))).toBe(false);
+  });
+});
+
+describe("a rules declaration that is not a list of rules", () => {
+  // The shape double-encoding gives you: `rules` survives as a JSON STRING.
+  // It used to read as "no declaration", so the permissive defaults ran
+  // under a declaration whose whole point was to lock the store down.
+  const encoded = { rules: '[{"path":"","read":"view","write":"owner"}]' };
+
+  it("is an error, not an absence", () => {
+    expect(compileRules(encoded).errors).toEqual(["rules must be an array of rule objects"]);
+    expect(compileRules({ rules: { 0: { path: "", write: "owner" } } }).errors).toEqual([
+      "rules must be an array of rule objects",
+    ]);
+    expect(compileRules({ rules: null }).errors).toEqual([
+      "rules must be an array of rule objects",
+    ]);
+    expect(compileRules("{}").errors).toEqual(["config must be an object"]);
+    expect(compileRules([]).errors).toEqual(["config must be an object"]);
+  });
+
+  it("closes the view instead of running the defaults", () => {
+    expect(can(encoded, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(encoded, "t/1", "write", viewer(null, "interact"))).toBe(false);
+    expect(can(encoded, "t/1", "read", viewer(A, "interact"))).toBe(false);
+    expect(can(encoded, "t/1", "write", viewer(A, "owner"))).toBe(true);
+  });
+
+  it("still treats an absent rules list as the defaults", () => {
+    for (const config of [{}, undefined, null, { rules: undefined }, { other: 1 }]) {
+      expect(compileRules(config).errors).toEqual([]);
+      expect(can(config, "t/1", "write", viewer(A, "interact"))).toBe(true);
+    }
+  });
+});
+
+describe("a rule that sets no level", () => {
+  // `raed` instead of `read`: the author believes the root is locked down,
+  // and every level below it is inherited from the permissive defaults.
+  const typo = { rules: [{ path: "", raed: "owner" }] };
+
+  it("is refused, and closes the view", () => {
+    expect(compileRules(typo).errors).toEqual(["rule 0: a rule must set read, write, or both"]);
+    expect(can(typo, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(typo, "t/1", "read", viewer(null, "view"))).toBe(false);
+  });
+
+  it("still accepts a rule that sets only one level", () => {
+    const one = { rules: [{ path: "notes", write: "admin" }] };
+    expect(compileRules(one).errors).toEqual([]);
+    expect(can(one, "notes/n1", "read", viewer(A, "view"))).toBe(true);
+    expect(can(one, "notes/n1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(one, "notes/n1", "write", viewer(A, "admin"))).toBe(true);
+  });
+});
+
+describe("the errors a bad declaration reports", () => {
+  it("bounds and escapes the path it echoes back", () => {
+    // The message reaches a server console and a `POST /api/artifacts` 400
+    // body, so a path may not smuggle newlines into either, or dump a
+    // megabyte on first touch.
+    const nasty = { rules: [{ path: `x\ny/${"z".repeat(5000)}` }] };
+    const [message] = compileRules(nasty).errors;
+    expect(message).toMatch(/is not a rule path/);
+    expect(message).not.toContain("\n");
+    expect((message as string).length).toBeLessThan(120);
+  });
 });
