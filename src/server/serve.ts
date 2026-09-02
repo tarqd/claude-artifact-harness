@@ -265,13 +265,14 @@ function artifactIdFrom(host: string | undefined, header: string | undefined): s
  * strings, so a textual `===` against the un-normalized value would reject
  * every `next=`, including legitimate same-origin ones.
  *
- * Returns the *parsed* `target.href`, not the raw `next` string it was
- * validated from: `new URL()` silently strips ASCII tab/CR/LF while parsing,
- * so a same-origin-looking `next` smuggling CRLF would otherwise reach
+ * Returns a root-relative Location (`pathname + search + hash`) derived from
+ * the *parsed* URL, never the raw `next` string it was validated from:
+ * `new URL()` silently strips ASCII tab/CR/LF while parsing, so a
+ * same-origin-looking `next` smuggling CRLF would otherwise reach
  * `Headers.set` verbatim, which throws on control characters (crashing the
- * request). Reassembling from `target.pathname` instead of using `href`
- * whole would have the same bug in the other direction: `new URL("/..//evil.com",
- * shellOrigin).pathname` is `//evil.com`, itself protocol-relative.
+ * request). A pathname that would itself read as protocol-relative once
+ * re-emitted (`new URL("/..//evil.com", shellOrigin).pathname` is
+ * `//evil.com`) is rejected by the guard below rather than redirected to.
  */
 export function resolveNextRedirect(next: string, shellOrigin: string): string | null {
   let target: URL;
@@ -286,10 +287,8 @@ export function resolveNextRedirect(next: string, shellOrigin: string): string |
   // Emit a root-relative Location rather than `target.href`: an absolute
   // URL would carry the shell's *internal* origin (e.g. `http://host:port`)
   // straight into the browser, which is wrong behind a proxy or a
-  // differently-hosted deployment. Clear any embedded credentials first —
-  // they're meaningless in a relative Location but shouldn't be echoed.
-  target.username = "";
-  target.password = "";
+  // differently-hosted deployment. (Userinfo in `next` never reaches the
+  // output: `origin` excludes it and so does the path/search/hash below.)
   const rel = target.pathname + target.search + target.hash;
   // A single leading "/" followed by anything but another "/" or "\": this
   // rejects `//evil.com` and `/\evil.com`-shaped pathnames (e.g. from
