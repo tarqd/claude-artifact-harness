@@ -15,7 +15,7 @@ is Anthropic code — the wire protocol is reimplemented from the analysis in
 
 Everything in the v0 roster is implemented and tested end to end: the page
 envelope, the handshake, `claude.use()`, the capability RPC, and all ten
-capability slices. `npm run build && npm test && npm run e2e` is green.
+capability slices. `npm test && npm run e2e` is green.
 
 | Capability | What a page gets |
 |---|---|
@@ -72,10 +72,15 @@ For `sample` to answer, the server needs either `ANTHROPIC_API_KEY` or
 ### Tests
 
 ```bash
-npm run build
 npm test             # vitest unit tests, per slice
 npm run e2e          # Playwright: each fixture through the real shell and server
 ```
+
+Both suites start real servers, and a server serves the preamble, the runtime
+modules and the shell bundle off disk, so each builds the client bundles once
+in its own global setup (`test/global-setup.ts`, `e2e/global-setup.ts`). No
+separate `npm run build` is needed first; run it when you want the typecheck
+and a clean `dist/`.
 
 `e2e/kitchen-sink.spec.ts` is the integration spec: one artifact declaring
 every capability, asserting each `use()` resolves non-null, that the `db` and
