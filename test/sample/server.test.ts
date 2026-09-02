@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startServer, type RunningServer } from "../../src/server/index.ts";
+import { fakeBackendCallCount } from "../../src/capabilities/sample/server.ts";
 import type { SampleEvent } from "../../src/capabilities/sample/protocol.ts";
 
 let server: RunningServer;
@@ -17,6 +18,10 @@ let plainId: string;
 /** Declares `sample`, but neither images nor tools. */
 let bareId: string;
 let cookie: string;
+/** A second viewer on the same server, for "not your call". */
+let strangerCookie: string;
+/** The view-only server signs its own cookies, so it needs its own viewer. */
+let readOnlyCookie: string;
 
 const PAGE = "<p>sample fixture</p>";
 
@@ -102,10 +107,19 @@ beforeAll(async () => {
   plainId = await create(server, { db: {} });
   // One viewer identity for every request in this file: the tool-results lane
   // only answers the viewer whose call is waiting.
-  const page = await fetch(`${server.shellOrigin}/a/${artifactId}`);
-  cookie = (page.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
-  expect(cookie).toMatch(/^av=/);
+  cookie = await shellCookie(server);
+  strangerCookie = await shellCookie(server);
+  readOnlyCookie = await shellCookie(readOnly);
+  expect(strangerCookie).not.toBe(cookie);
 });
+
+/** Open the shell page as a fresh browser would, and keep the viewer cookie. */
+async function shellCookie(target: RunningServer): Promise<string> {
+  const page = await fetch(`${target.shellOrigin}/a/${artifactId}`);
+  const value = (page.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  expect(value).toMatch(/^av=/);
+  return value;
+}
 
 afterAll(async () => {
   delete process.env.SAMPLE_BACKEND;
@@ -206,7 +220,7 @@ describe("POST /api/frame/sample/call", () => {
     expect(toolCallId).not.toBe("");
     const stranger = await fetch(`${server.shellOrigin}/api/frame/sample/tool_results`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", cookie: strangerCookie },
       body: JSON.stringify({ callId, results: [{ id: toolCallId, content: "x" }] }),
     });
     expect(stranger.status).toBe(403);
@@ -327,7 +341,7 @@ describe("POST /api/frame/sample/call", () => {
   it("refuses a view-only viewer", async () => {
     const response = await fetch(`${readOnly.shellOrigin}/api/frame/sample/call`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", cookie: readOnlyCookie },
       body: JSON.stringify({ callId: nextCallId(), artifactId, input: "hi" }),
     });
     expect(response.status).toBe(403);
@@ -348,5 +362,104 @@ describe("POST /api/frame/sample/call", () => {
       process.env.SAMPLE_BACKEND = "fake";
       if (key !== undefined) process.env.ANTHROPIC_API_KEY = key;
     }
+  });
+});
+
+/**
+ * A completion spends the operator's API key, so the route has to be sure the
+ * shell page asked and that the asker holds a viewer cookie the server itself
+ * signed. Neither a cross-site "simple" POST nor a bare HTTP client has both.
+ */
+describe("the origin and cookie guard", () => {
+  const body = (): string =>
+    JSON.stringify({ callId: nextCallId(), artifactId, input: "hi", modelTier: "complex" });
+
+  it("refuses the cross-site simple POST without running a completion", async () => {
+    const before = fakeBackendCallCount();
+    const response = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+      method: "POST",
+      headers: {
+        "content-type": "text/plain",
+        origin: "https://evil.example",
+        "sec-fetch-site": "cross-site",
+      },
+      body: body(),
+    });
+    expect(response.status).toBe(415);
+    expect(response.headers.get("content-type")).not.toContain("text/event-stream");
+    // Nothing was minted either: a refusal must not hand out an identity.
+    expect(response.headers.get("set-cookie")).toBe(null);
+    await response.text();
+    expect(fakeBackendCallCount()).toBe(before);
+  });
+
+  it("refuses another site's origin and any cross-site fetch", async () => {
+    const otherOrigin = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: "https://evil.example" },
+      body: body(),
+    });
+    expect(otherOrigin.status).toBe(403);
+    expect((await otherOrigin.json()) as { code: string }).toMatchObject({ code: "not_granted" });
+
+    const crossSite = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, "sec-fetch-site": "cross-site" },
+      body: body(),
+    });
+    expect(crossSite.status).toBe(403);
+    expect((await crossSite.json()) as { code: string }).toMatchObject({ code: "not_granted" });
+  });
+
+  it("refuses a caller that carries no viewer cookie, and mints none", async () => {
+    const before = fakeBackendCallCount();
+    const response = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: server.shellOrigin,
+        "sec-fetch-site": "same-origin",
+      },
+      body: body(),
+    });
+    expect(response.status).toBe(403);
+    expect((await response.json()) as { code: string }).toMatchObject({ code: "not_granted" });
+    expect(response.headers.get("set-cookie")).toBe(null);
+    expect(fakeBackendCallCount()).toBe(before);
+  });
+
+  it("refuses the tool-results lane on the same terms", async () => {
+    const crossSite = await fetch(`${server.shellOrigin}/api/frame/sample/tool_results`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: "https://evil.example" },
+      body: JSON.stringify({ callId: "nope", results: [] }),
+    });
+    expect(crossSite.status).toBe(403);
+
+    const anonymous = await fetch(`${server.shellOrigin}/api/frame/sample/tool_results`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callId: "nope", results: [] }),
+    });
+    expect(anonymous.status).toBe(403);
+    expect(anonymous.headers.get("set-cookie")).toBe(null);
+  });
+
+  it("still streams for the shell page's own request", async () => {
+    const response = await fetch(`${server.shellOrigin}/api/frame/sample/call`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie,
+        origin: server.shellOrigin,
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({ callId: nextCallId(), artifactId, input: "hello there" }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const list = await collect(response);
+    expect(list.at(-1)).toEqual({ type: "done", truncated: false });
+    expect(textOf(list)).toContain("hello there");
   });
 });

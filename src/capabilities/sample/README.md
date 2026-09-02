@@ -91,6 +91,17 @@ imports the other.
   `tool_use{calls}`, `done{truncated}` and `error{code,message}`. It refuses
   an artifact that does not declare `sample`, a `view`-level viewer, and a
   prompt over 64 KiB.
+- Before any of that, and before the body is read, both routes go through the
+  spine guard (`src/server/guard.ts`): the request must be `application/json`
+  and carry neither a `Sec-Fetch-Site` nor an `Origin` naming another site,
+  and it must already hold a viewer cookie this server signed
+  (`auth.existingViewer`, never `auth.viewer` — an API lane that minted an
+  identity would accept a caller that has none). Consent for `sample` lives in
+  the shell page's `localStorage`, so the server cannot see it; what it can
+  see is whether the shell page is what asked. Without this a "simple"
+  cross-site POST (`text/plain`, `mode: "no-cors"`) from any site the viewer
+  visits — or a bare HTTP client that knows an artifact id — drives
+  completions on the operator's key.
 - Every page-side limit is re-checked here, because this route — not the
   shell page — is what a direct HTTP caller meets: a body over 8 MB is
   `too_large` (413) before it is parsed; `images`/`tools` are refused as
@@ -120,8 +131,8 @@ Environment: `ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL`,
 - **A second route, `POST /api/frame/sample/tool_results`.** The documented
   surface names only the call route; a tool round needs a way back in while
   the SSE response is still open. The shell posts the page's results there
-  with the `callId` it generated, and only the viewer whose call is waiting
-  may answer it. Nothing about the frame↔shell protocol changes.
+  with the `callId` it generated; it meets the same origin-and-cookie guard as
+  the call, and only the viewer whose call is waiting may answer it. Nothing about the frame↔shell protocol changes.
 - **`fetch` instead of `ctx.api` for the stream.** `BrokerContext.api` parses
   one JSON body; SSE needs the raw response. The broker still calls its own
   origin with `credentials: "same-origin"`, so no credential is handled in

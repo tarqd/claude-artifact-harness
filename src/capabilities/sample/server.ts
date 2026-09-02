@@ -8,10 +8,16 @@
  * a deterministic fake enabled with `SAMPLE_BACKEND=fake` so the tests run
  * with no key and no network.
  */
-import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { capError, isCapError, type CapError } from "../../protocol/errors.ts";
 import { isArtifactId } from "../../protocol/paths.ts";
+import {
+  readJsonBody,
+  refuse,
+  Refusal,
+  sameOriginOnly,
+  type Lane,
+} from "../../server/guard.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import {
   MAX_PROMPT_BYTES,
@@ -42,8 +48,13 @@ const TOOL_RESULTS_TIMEOUT_MS = 160_000;
  * them for an honest frame; this route is the boundary a direct HTTP caller
  * meets, and it trusts nothing but the artifact's own declared config.
  */
-/** Largest request body, generous enough for 5 MB of base64 images. */
-const MAX_BODY_BYTES = 8_000_000;
+/** This slice's face to the spine guard: what it is, and how much it reads. */
+const LANE: Lane = {
+  what: "sampling calls",
+  badRequestCode: "invalid_request",
+  /** Generous enough for 5 MB of base64 images. */
+  maxBodyBytes: 8_000_000,
+};
 /** The image types the Messages API reads. */
 const API_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 const MAX_TOOL_DEFINITIONS_BYTES = 32_768;
@@ -457,22 +468,6 @@ function readInput(raw: unknown): SampleInput | null {
 
 /* ------------------------- the artifact's own config ----------------------- */
 
-type FailStatus = 400 | 403 | 404 | 409 | 413 | 429 | 503;
-
-/** A refusal carrying the status and the `{code, message}` body to answer. */
-class Refusal extends Error {
-  constructor(
-    readonly status: FailStatus,
-    readonly error: CapError,
-  ) {
-    super(error.message);
-  }
-}
-
-function refuse(status: FailStatus, code: string, message: string): never {
-  throw new Refusal(status, capError(code, message));
-}
-
 interface ImageLimits {
   maxCount: number;
   maxBytes: number;
@@ -577,27 +572,6 @@ function readImages(raw: unknown, limits: ImageLimits | null): WireImage[] {
   return out;
 }
 
-/** Read the body, refusing one too big to hold before it is parsed. */
-async function readBody(c: Context): Promise<CallBody> {
-  const declared = Number(c.req.header("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    refuse(413, "too_large", "the request body is too large");
-  }
-  const raw = await c.req.text().catch(() => "");
-  if (raw.length > MAX_BODY_BYTES) {
-    refuse(413, "too_large", "the request body is too large");
-  }
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch {
-    refuse(400, "invalid_request", "bad request body");
-  }
-  const body = asRecord(parsed);
-  if (!body) refuse(400, "invalid_request", "bad request body");
-  return body as CallBody;
-}
-
 export function routes(apps: ServerApps, ctx: ServerContext): void {
   apps.shell.post("/api/frame/sample/call", async (c) => {
     // Everything the page API promises is re-checked here: this route, not
@@ -613,7 +587,13 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       backend: SampleBackend;
     };
     try {
-      const body = await readBody(c);
+      // The origin check and the cookie come first: a completion costs the
+      // operator's key, so nothing is read from a caller that is not the
+      // shell page carrying a viewer it was already given.
+      sameOriginOnly(c, ctx, LANE);
+      const viewer = ctx.auth.existingViewer(c);
+      if (!viewer) refuse(403, "not_granted", "this request carries no viewer");
+      const body = (await readJsonBody(c, LANE)) as CallBody;
       if (typeof body.callId !== "string" || !isArtifactId(String(body.artifactId))) {
         refuse(400, "invalid_request", "bad request body");
       }
@@ -624,7 +604,6 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       if (!declared) {
         refuse(400, "not_declared", "this artifact no longer declares sample");
       }
-      const viewer = ctx.auth.viewer(c);
       const level = ctx.auth.levelFor(viewer, meta);
       if (level === "view") {
         refuse(403, "not_granted", "this viewer may not use Claude here");
@@ -737,19 +716,28 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
   });
 
   apps.shell.post("/api/frame/sample/tool_results", async (c) => {
-    const body = (await c.req.json().catch(() => null)) as {
-      callId?: unknown;
-      results?: unknown;
-    } | null;
-    if (!body || typeof body.callId !== "string" || !Array.isArray(body.results)) {
+    // This lane resumes a stream the operator's key is already paying for, so
+    // it meets the same guard as the call it answers.
+    let body: Record<string, unknown>;
+    let viewerId: string;
+    try {
+      sameOriginOnly(c, ctx, LANE);
+      const viewer = ctx.auth.existingViewer(c);
+      if (!viewer) refuse(403, "not_granted", "this request carries no viewer");
+      viewerId = viewer.id;
+      body = await readJsonBody(c, LANE);
+    } catch (err) {
+      if (err instanceof Refusal) return c.json(err.error, err.status);
+      throw err;
+    }
+    if (typeof body.callId !== "string" || !Array.isArray(body.results)) {
       return c.json({ code: "invalid_request", message: "callId and results are required" }, 400);
     }
     const waiter = waiters.get(body.callId);
     // A call nobody is waiting on is over: say so rather than holding bytes.
     if (!waiter) return c.json({ code: "invalid_request", message: "no such call" }, 404);
-    const viewer = ctx.auth.viewer(c);
     // Only the viewer whose call this is may answer its tools.
-    if (waiter.viewerId !== viewer.id) {
+    if (waiter.viewerId !== viewerId) {
       return c.json({ code: "not_granted", message: "not your call" }, 403);
     }
     const results: WireToolResult[] = [];
