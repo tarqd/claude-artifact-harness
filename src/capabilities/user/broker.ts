@@ -7,9 +7,11 @@
  *   search    POST /api/frame/user/search/<artifactId>
  *
  * Identity is the shell's own viewer cookie, carried by `ctx.api` on a
- * same-origin fetch — the frame is never handed a token or a session, and
- * cannot ask about a viewer of another artifact: the artifact id comes from
- * the boot record, never from the call.
+ * same-origin fetch — these four verbs never hand the frame a token or a
+ * session of its own, and it cannot ask about a viewer of another artifact:
+ * the artifact id comes from the boot record, never from the call. (The
+ * frame origin does see `__frame_t` once, in its own iframe `src`; the
+ * preamble strips it from `location` on boot — see `assetToken` below.)
  *
  * The frame swallows every error into a benign default, so this layer is
  * free to be strict: a malformed argument is refused rather than guessed at.
@@ -27,8 +29,11 @@ import {
 /**
  * The signed asset token minted with the boot record. The backend needs it
  * before it will record the viewer in the artifact's directory, so a cookie
- * alone cannot join a peer list. It travels shell -> backend only; the frame
- * is never handed it (it is already in the iframe's own URL).
+ * alone cannot join a peer list. This header carries it shell -> backend
+ * only, via `ctx.boot`, never through the frame: the frame origin does
+ * receive the same token once, in its own iframe `src`, but the preamble
+ * strips it from `location` on boot and this slice's frame module never
+ * reads or resends it.
  */
 function assetToken(ctx: BrokerContext): string | null {
   try {

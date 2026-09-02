@@ -59,7 +59,10 @@ export function avatarForColor(color: string): string {
 /**
  * Header the broker uses to hand the backend the signed asset token from the
  * boot record: proof that the shell really rendered this artifact for this
- * viewer. It travels shell -> backend only; the frame is never handed it.
+ * viewer. The broker sends it shell -> backend only; the frame origin does
+ * see the same token once, in its own iframe URL (`__frame_t`), but never
+ * through this header — the preamble strips it from `location` on boot
+ * (`src/frame/preamble.ts`) and this slice's frame module never reads it.
  */
 export const FRAME_TOKEN_HEADER = "x-artifact-frame-token";
 

@@ -257,7 +257,18 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
     const ok = ctx.auth.login(c, c.req.query("token") ?? "");
     if (!ok) return c.text("invalid owner token", 403);
     const next = c.req.query("next");
-    if (next && next.startsWith("/")) return c.redirect(next);
+    if (next) {
+      // Resolved against the shell origin so protocol-relative (`//evil.com`)
+      // and backslash (`/\evil.com`, which browsers treat as `//evil.com`)
+      // forms land off-origin and are rejected, not just checked textually.
+      let target: URL | null = null;
+      try {
+        target = new URL(next, ctx.shellOrigin);
+      } catch {
+        target = null;
+      }
+      if (target && target.origin === ctx.shellOrigin) return c.redirect(next);
+    }
     return c.text("logged in as the owner");
   });
 
@@ -286,9 +297,13 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
     // The consent dialog lives on this page: it must not be framed, and its
     // type must not be sniffed. (The frame origin gets its own headers in
     // `mountFrameRoutes`; this is the same posture for the decision surface.)
+    // It also inlines `__SHELL_BOOT.frameUrl`, which carries the 30-minute
+    // `__frame_t` asset token naming this viewer — `no-store` keeps that out
+    // of shared-machine and proxy caches, matching the frame HTML's posture.
     return c.html(renderShellPage(boot), 200, {
       "content-security-policy": "frame-ancestors 'none'",
       "x-content-type-options": "nosniff",
+      "cache-control": "no-store",
     });
   });
 

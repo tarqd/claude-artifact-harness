@@ -110,6 +110,13 @@ viewer — proof the shell really rendered the artifact for them. A token that
 has since expired is not an error: the viewer joined at load, and a
 long-open page keeps reading the directory.
 
+The token itself is not exclusive to the shell: it is the same `__frame_t`
+the shell already put in the iframe's `src`, so the frame origin sees it once
+too, in `location.search`, before the preamble strips it with
+`history.replaceState` (`src/frame/preamble.ts`). This slice's own use of it
+is the header above, sent shell -> backend; the frame never reads or
+forwards it itself.
+
 The peer list is the privacy boundary. A viewer becomes a peer of an
 artifact by opening it (the page's first `profile` call). `profiles(ids)`
 resolves only peers of the calling artifact plus the caller, so one artifact
