@@ -159,7 +159,9 @@ neither a `Sec-Fetch-Site` nor an `Origin` naming another site — a
 cross-site "simple" POST would otherwise run a tool with no dialog, cookie
 or not), require the artifact to declare `mcp` and the viewer to be able
 to interact (`view` → `not_granted`), and meter the body against a 512 KiB
-cap as it streams. `/servers` answers the manifest intersected with the
+cap as it streams. That origin check and that metered body reader are the
+spine's (`src/server/guard.ts`), shared with `sample`; this slice supplies
+only its own limit and its own error vocabulary. `/servers` answers the manifest intersected with the
 directory: a server the directory does not know or a `host:` one is
 omitted; a server that fails to list answers with an empty tool set and its
 auth status. `/call` re-checks the manifest, refuses `host:` servers and

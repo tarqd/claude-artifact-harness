@@ -15,8 +15,15 @@
  */
 import type { Context } from "hono";
 import type { StatusCode } from "hono/utils/http-status";
-import { capError, type CapError } from "../../protocol/errors.ts";
 import { isArtifactId } from "../../protocol/paths.ts";
+import {
+  readJsonBody,
+  refuse,
+  Refusal,
+  sameOriginOnly,
+  type FailStatus,
+  type Lane,
+} from "../../server/guard.ts";
 import type { ArtifactMeta } from "../../server/store.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import { createClientPool } from "./client.ts";
@@ -36,8 +43,13 @@ import {
   type ToolInfo,
 } from "./protocol.ts";
 
-/** Largest request body: an input under the 256 KiB cap plus its envelope. */
-const MAX_BODY_BYTES = 512 * 1024;
+/** This slice's face to the spine guard: what it is, and how much it reads. */
+const LANE: Lane = {
+  what: "connector calls",
+  badRequestCode: "bad_request",
+  /** An input under the 256 KiB cap plus its envelope. */
+  maxBodyBytes: 512 * 1024,
+};
 /** Largest result forwarded to the shell; a connector past this is broken or hostile. */
 const MAX_RESULT_BYTES = 4 * 1024 * 1024;
 /** Calls one viewer may have running at once, across every tab they have. */
@@ -46,21 +58,6 @@ const MAX_CALLS_PER_VIEWER = 8;
 const MAX_CALLS_TOTAL = 64;
 const SERVERS_TIMEOUT_MS = 65_000;
 const CALL_TIMEOUT_MS = 120_000;
-
-type FailStatus = 400 | 401 | 403 | 404 | 409 | 413 | 415 | 429 | 500 | 502 | 503;
-
-class Refusal extends Error {
-  constructor(
-    readonly status: FailStatus,
-    readonly error: CapError,
-  ) {
-    super(error.message);
-  }
-}
-
-function refuse(status: FailStatus, code: string, message: string): never {
-  throw new Refusal(status, capError(code, message));
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -92,83 +89,6 @@ function statusFor(error: McpError): FailStatus {
     default:
       return 500;
   }
-}
-
-/**
- * Only the shell page may call these lanes. A connector call has side
- * effects and the viewer's consent is kept in the shell page alone, so a
- * request from any other site — which the browser would otherwise send as
- * a "simple" cross-site POST, with the cookie under `SameSite=Lax` left
- * off but the effect still happening — is refused before the body is read.
- */
-function sameOriginOnly(c: Context, ctx: ServerContext): void {
-  const contentType = (c.req.header("content-type") ?? "").toLowerCase();
-  if (!contentType.startsWith("application/json")) {
-    refuse(415, "bad_request", "the body must be application/json");
-  }
-  const site = c.req.header("sec-fetch-site");
-  if (site !== undefined && site !== "same-origin" && site !== "none") {
-    refuse(403, "not_granted", "connector calls are only accepted from the shell page");
-  }
-  const origin = c.req.header("origin");
-  if (origin !== undefined && origin !== ctx.shellOrigin) {
-    refuse(403, "not_granted", "connector calls are only accepted from the shell page");
-  }
-}
-
-/**
- * Read the body with a running byte cap: a request that declares no length
- * (chunked) or lies about it is refused as soon as it crosses the cap, never
- * after it has been buffered whole.
- */
-async function readBody(c: Context): Promise<Record<string, unknown>> {
-  const declared = Number(c.req.header("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    refuse(413, "too_large", "the request body is too large");
-  }
-  let bytes: Uint8Array;
-  const stream = c.req.raw.body;
-  if (!stream) {
-    bytes = new Uint8Array(await c.req.arrayBuffer());
-    if (bytes.byteLength > MAX_BODY_BYTES) refuse(413, "too_large", "the request body is too large");
-  } else {
-    const reader = stream.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        total += value.byteLength;
-        if (total > MAX_BODY_BYTES) {
-          await reader.cancel().catch(() => undefined);
-          refuse(413, "too_large", "the request body is too large");
-        }
-        chunks.push(value);
-      }
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        /* already released by cancel() */
-      }
-    }
-    bytes = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-  }
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-  } catch {
-    refuse(400, "bad_request", "bad request body");
-  }
-  if (!isRecord(parsed)) refuse(400, "bad_request", "bad request body");
-  return parsed as Record<string, unknown>;
 }
 
 interface Gate {
@@ -277,8 +197,8 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
     let resolved: Gate;
     let dir: ConnectorDirectory;
     try {
-      sameOriginOnly(c, ctx);
-      resolved = await gate(c, ctx, await readBody(c));
+      sameOriginOnly(c, ctx, LANE);
+      resolved = await gate(c, ctx, await readJsonBody(c, LANE));
       dir = directoryOf();
     } catch (err) {
       if (err instanceof Refusal) return c.json(err.error, err.status);
@@ -320,8 +240,8 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       dir: ConnectorDirectory;
     };
     try {
-      sameOriginOnly(c, ctx);
-      const body = await readBody(c);
+      sameOriginOnly(c, ctx, LANE);
+      const body = await readJsonBody(c, LANE);
       const resolved = await gate(c, ctx, body);
       const { server, tool } = body;
       if (!isName(server)) refuse(400, "bad_request", "server must be a connector's display name");
