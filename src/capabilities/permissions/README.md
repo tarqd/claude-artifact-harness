@@ -54,6 +54,24 @@ resolves the resulting states. Two calls racing for one capability share one
 dialog. Names that are already `"granted"`, already `"denied"`, or
 `"unavailable"` are answered without a dialog at all.
 
+**A dialog settles before it can be accepted.** The page chooses *when* to
+ask, so the ask itself is attacker-timed: the dialog
+(`src/shell/consent.ts`) focuses no button — focus goes to the dialog element
+— and ignores every activation of "Allow" for `CONSENT_SETTLE_MS` (500 ms).
+Refusing is never delayed: the cancel button and Escape work immediately.
+
+That comes from the September 2026 security review (finding 5): a page that
+calls `request(["sample"])` while the viewer holds Space in a game must not
+be able to turn the next keypress into a sticky grant for `sample` — a key
+the `sample` and `mcp` brokers honour too. The control lives in the shared
+dialog rather than in this slice on purpose: the same grant is reachable
+through `sample.call` and `mcp.callTool`, so gating `request()` on a user
+gesture would move the attack rather than close it — and would refuse the
+platform's own `permissions` module, which posts `request` plainly
+(`docs/surface-area.md` §4 lists `includeUserActivation` for `mcp` and
+`notifications`, and `docs/analysis/shell.md` adds `sample`; `permissions`
+appears in neither).
+
 **Mount shape** (`frame.ts`) — the namespace mounts either way, because
 `use()` is not the permission gate:
 
@@ -138,6 +156,9 @@ artifact's consent state, and there is no per-account storage to serve.
   decision at reload: the answer is remembered only in memory for the life of
   the view. A dialog cap of five per artifact per minute keeps a page from
   turning any re-prompting path into a stream of modals over the shell.
+- The settle delay is per dialog, not per call: `request(["mcp"])` asks about
+  every declared server in turn, and each of those dialogs settles on its own
+  before it can be accepted.
 - `request()` prompts one capability at a time. With today's single consent
   capability that is at most one dialog; a multi-capability ask would want one
   dialog listing them.
@@ -146,12 +167,14 @@ artifact's consent state, and there is no per-account storage to serve.
 
 ```
 npm run build
-npx vitest run test/permissions       # protocol limits, frame wire + budgets, broker rules
+npx vitest run test/permissions test/shell   # protocol limits, frame wire + budgets, broker rules, shared dialog
 npx playwright test e2e/permissions.spec.ts
 ```
 
 `test/permissions/frame.test.ts` drives the namespace over a fake `RpcHost`
 (no browser): envelopes, the local shape, and the 130 s → 900 s ack budget.
+`test/shell/consent.test.ts` covers the shared dialog this slice prompts
+through.
 `test/permissions/broker.test.ts` drives the broker over a fake
 `BrokerContext` and a fake `localStorage`, including through the real shell
 dispatcher. `e2e/permissions.spec.ts` loads `fixtures/permissions.html`

@@ -51,8 +51,11 @@ through an object URL. Nothing is uploaded, stored or logged.
    (`rate_limited`). A declined prompt still counts; a refused filename or an
    oversized file never does, because it never prompted.
 5. **Consent.** `ctx.ack(id)` first, then `ctx.consent` with the final name
-   and a human-readable size, over an iframe the shell makes `inert`. "No" is
-   `declined`, and a refusal is never remembered — the next offer asks again.
+   and a human-readable size, over an iframe the shell makes `inert`. The
+   dialog focuses no button and ignores "Save" for its first 500 ms
+   (`CONSENT_SETTLE_MS`), so a `save()` timed under a keypress saves nothing.
+   "No" is `declined`, and a refusal is never remembered — the next offer
+   asks again.
 6. **Delivery.** `new Blob([bytes], {type: mimeFor(extension)})` → object URL
    → a hidden `<a download>` in the shell document, clicked and removed, with
    the URL revoked a minute later. A view with no save surface answers
