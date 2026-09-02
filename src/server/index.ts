@@ -9,6 +9,7 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { createAuth } from "./auth.ts";
 import { frameOrigin, loadConfig, shellOrigin, type ServerConfig } from "./config.ts";
+import { hostGuard, originGuard } from "./guards.ts";
 import { mountCapabilityRoutes } from "./routes.ts";
 import { isArtifactId } from "../protocol/paths.ts";
 import { mountFrameRoutes, mountShellRoutes } from "./serve.ts";
@@ -82,6 +83,17 @@ export async function startServer(
       shutdownHooks.push(fn);
     },
   };
+
+  // Before any route: the host and origin guards (`guards.ts`). Hono
+  // dispatches middleware in registration order, so these have to be mounted
+  // ahead of the spine and the slices — a guard registered after
+  // `app.get("/_f/:ver/*")` never runs for the document it exists to protect.
+  shellApp.use("*", hostGuard(config, "shell"));
+  shellApp.use("*", originGuard(context));
+  // The frame origin serves GET/HEAD only, and its identity is the signed
+  // `__frame_t`, not a cookie: there is no write there for `originGuard` to
+  // stand in front of.
+  frameApp.use("*", hostGuard<FrameEnv>(config, "frame"));
 
   mountShellRoutes(shellApp, context);
   mountFrameRoutes(frameApp, context);

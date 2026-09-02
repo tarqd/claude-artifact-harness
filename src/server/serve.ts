@@ -306,7 +306,7 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
     // they are re-emitted from `URL.origin` and capped there (network/server.ts).
     c.header(
       "content-security-policy",
-      frameCsp(ctx.shellOrigin, connectSrcOrigins(meta?.capabilities)),
+      frameCsp(ctx.shellOrigin, connectSrcOrigins(meta?.capabilities, ctx.config)),
     );
     c.header("x-content-type-options", "nosniff");
     c.header("referrer-policy", "no-referrer");

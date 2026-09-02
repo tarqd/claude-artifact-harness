@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   MAX_ORIGINS,
   connectSrcOrigins,
+  isSelfHost,
   normalizeOrigin,
   validateOrigins,
 } from "../../src/capabilities/network/server.ts";
@@ -19,6 +20,8 @@ import { frameCsp } from "../../src/server/serve.ts";
 import type { FrameEnv } from "../../src/server/types.ts";
 
 const SHELL = "http://shell.test:8787";
+/** The deployment the validator is judged against in the unit tests. */
+const SELF = { shellHost: "shell.test", frameHostSuffix: "frames.test" };
 const DECLARED = "https://declared.example";
 const BLOB_HEADERS = { "content-security-policy": "default-src 'none'; sandbox" };
 
@@ -77,43 +80,90 @@ describe("validateOrigins", () => {
         "https://c.example/path",
         "nonsense",
         "https://d.example",
-      ]),
+      ], SELF),
     ).toEqual(["https://a.example", "https://d.example"]);
   });
 
   it("de-duplicates after normalisation", () => {
     expect(
-      validateOrigins(["https://a.example", "https://A.example/", "https://a.example:443"]),
+      validateOrigins(["https://a.example", "https://A.example/", "https://a.example:443"], SELF),
     ).toEqual(["https://a.example"]);
   });
 
   it("answers [] for anything that is not an array", () => {
     for (const bad of [undefined, null, "https://a.example", 7, {}]) {
-      expect(validateOrigins(bad as unknown)).toEqual([]);
+      expect(validateOrigins(bad as unknown, SELF)).toEqual([]);
     }
   });
 
   it("caps the list", () => {
     const many = Array.from({ length: MAX_ORIGINS + 10 }, (_, i) => `https://h${i}.example`);
-    expect(validateOrigins(many)).toHaveLength(MAX_ORIGINS);
+    expect(validateOrigins(many, SELF)).toHaveLength(MAX_ORIGINS);
+  });
+
+  it("drops the harness's own origins", () => {
+    // A declaration naming the shell is a page asking to `fetch` the surface
+    // that grants it its capabilities — with the viewer's cookie, where the
+    // two are same-site. A sibling frame origin is no better.
+    expect(
+      validateOrigins(
+        [
+          "https://shell.test",
+          "https://shell.test:8787",
+          `https://${"a".repeat(32)}.frames.test`,
+          "https://frames.test",
+          "https://deep.frames.test",
+          "https://SHELL.test",
+          "https://third-party.example",
+        ],
+        SELF,
+      ),
+    ).toEqual(["https://third-party.example"]);
+  });
+
+  it("keeps a host that merely looks like ours", () => {
+    // Suffix matching is on labels, not on characters: `notframes.test` is
+    // somebody else's domain.
+    expect(
+      validateOrigins(["https://notframes.test", "https://frames.test.evil.example"], SELF),
+    ).toEqual(["https://notframes.test", "https://frames.test.evil.example"]);
+  });
+});
+
+describe("isSelfHost", () => {
+  it("names the shell host, the frame suffix and every artifact under it", () => {
+    expect(isSelfHost("shell.test", SELF)).toBe(true);
+    expect(isSelfHost("SHELL.TEST", SELF)).toBe(true);
+    expect(isSelfHost("frames.test", SELF)).toBe(true);
+    expect(isSelfHost(`${"b".repeat(32)}.frames.test`, SELF)).toBe(true);
+    expect(isSelfHost("api.example.com", SELF)).toBe(false);
+    expect(isSelfHost("xframes.test", SELF)).toBe(false);
+  });
+
+  it("treats the shipped dev defaults as one host", () => {
+    // `SHELL_HOST` and `FRAME_HOST_SUFFIX` are both `localhost` out of the
+    // box, so nothing on it may be declared.
+    const dev = { shellHost: "localhost", frameHostSuffix: "localhost" };
+    expect(isSelfHost("localhost", dev)).toBe(true);
+    expect(isSelfHost(`${"c".repeat(32)}.localhost`, dev)).toBe(true);
   });
 });
 
 describe("connectSrcOrigins", () => {
   it("reads the declaration", () => {
     expect(
-      connectSrcOrigins({ network: { config: { origins: ["https://a.example"] } } }),
+      connectSrcOrigins({ network: { config: { origins: ["https://a.example"] } } }, SELF),
     ).toEqual(["https://a.example"]);
   });
 
   it("answers [] when network was not declared or is malformed", () => {
-    expect(connectSrcOrigins(undefined)).toEqual([]);
-    expect(connectSrcOrigins({})).toEqual([]);
-    expect(connectSrcOrigins({ network: {} })).toEqual([]);
-    expect(connectSrcOrigins({ network: { config: null } })).toEqual([]);
-    expect(connectSrcOrigins({ network: { config: { origins: "https://a.example" } } })).toEqual(
-      [],
-    );
+    expect(connectSrcOrigins(undefined, SELF)).toEqual([]);
+    expect(connectSrcOrigins({}, SELF)).toEqual([]);
+    expect(connectSrcOrigins({ network: {} }, SELF)).toEqual([]);
+    expect(connectSrcOrigins({ network: { config: null } }, SELF)).toEqual([]);
+    expect(
+      connectSrcOrigins({ network: { config: { origins: "https://a.example" } } }, SELF),
+    ).toEqual([]);
   });
 
   it("opens nothing for an optional declaration", () => {
@@ -121,9 +171,10 @@ describe("connectSrcOrigins", () => {
     // is no later grant path, so the page never gets the namespace; the
     // policy must not hand it a reach the view was not granted.
     expect(
-      connectSrcOrigins({
-        network: { config: { optional: true, origins: ["https://a.example"] } },
-      }),
+      connectSrcOrigins(
+        { network: { config: { optional: true, origins: ["https://a.example"] } } },
+        SELF,
+      ),
     ).toEqual([]);
   });
 });
@@ -237,7 +288,7 @@ describe("the CSP the frame origin serves", () => {
     const declared = ["https://good.example", "http://insecure.example"];
     const id = await create({ network: { origins: declared } });
     expect(connectSrc(await policyFor(id))).toBe("connect-src 'self' https://good.example");
-    expect(connectSrcOrigins({ network: { config: { origins: declared } } })).toEqual([
+    expect(connectSrcOrigins({ network: { config: { origins: declared } } }, SELF)).toEqual([
       "https://good.example",
     ]);
   });

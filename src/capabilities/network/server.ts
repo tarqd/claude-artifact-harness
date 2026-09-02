@@ -25,6 +25,14 @@
  *    as a source expression prefix), or a wildcard host are not "absolute
  *    https origins" and are dropped. The list is also capped: a header that
  *    grows without bound is a document that eventually fails to load.
+ * 3. **The harness's own origins.** An artifact declaring the shell's host —
+ *    or a sibling artifact's `<id>.<FRAME_HOST_SUFFIX>` — is not asking for a
+ *    third-party API, it is asking to `fetch` the surface that grants it its
+ *    own capabilities. Where a deployment puts shell and frames under one
+ *    registrable domain the viewer cookie is *same-site* for that fetch, so
+ *    the page could write the shell API as the viewer. `SelfHosts` names
+ *    those hosts and they are dropped. (`server/guards.ts` refuses the
+ *    request as well; this stops the browser from ever making it.)
  *
  * Dropping is silent, as CSP itself is: an author who declared a bad origin
  * sees the fetch blocked in the console, which is where the platform puts it.
@@ -95,15 +103,39 @@ export function normalizeOrigin(value: unknown): string | null {
 }
 
 /**
- * The declared list → the `connect-src` sources to add beyond `'self'`:
- * validated, normalised, de-duplicated, order preserved, capped.
+ * The hosts this deployment is itself served at, which no declaration may
+ * open. `shellHost` is `SHELL_HOST`; `frameHostSuffix` is `FRAME_HOST_SUFFIX`,
+ * and covers both the bare suffix and every `<artifactId>.<suffix>` sibling.
  */
-export function validateOrigins(value: unknown): string[] {
+export interface SelfHosts {
+  shellHost: string;
+  frameHostSuffix: string;
+}
+
+/**
+ * Is this hostname one of the harness's own? The shell's host exactly, the
+ * frame suffix exactly, or any label under the frame suffix — a sibling
+ * artifact's origin is no more a third party than our own is.
+ */
+export function isSelfHost(hostname: string, self: SelfHosts): boolean {
+  const host = hostname.toLowerCase();
+  const suffix = self.frameHostSuffix.trim().toLowerCase();
+  if (host === self.shellHost.trim().toLowerCase()) return true;
+  return suffix !== "" && (host === suffix || host.endsWith(`.${suffix}`));
+}
+
+/**
+ * The declared list → the `connect-src` sources to add beyond `'self'`:
+ * validated, normalised, self-hosts dropped, de-duplicated, order preserved,
+ * capped.
+ */
+export function validateOrigins(value: unknown, self: SelfHosts): string[] {
   if (!Array.isArray(value)) return [];
   const out: string[] = [];
   for (const entry of value) {
     const origin = normalizeOrigin(entry);
     if (origin === null || out.includes(origin)) continue;
+    if (isSelfHost(new URL(origin).hostname, self)) continue;
     out.push(origin);
     if (out.length >= MAX_ORIGINS) break;
   }
@@ -122,10 +154,11 @@ export function validateOrigins(value: unknown): string[] {
  */
 export function connectSrcOrigins(
   capabilities: Record<string, { config?: unknown }> | undefined,
+  self: SelfHosts,
 ): string[] {
   const config = capabilities?.network?.config;
   if (typeof config !== "object" || config === null || Array.isArray(config)) return [];
   const record = config as { optional?: unknown; origins?: unknown };
   if (record.optional === true) return [];
-  return validateOrigins(record.origins);
+  return validateOrigins(record.origins, self);
 }
