@@ -4,7 +4,7 @@
  * and the CSP (design.md "Page envelope", surface-area.md §10). The string
  * builders at the top are pure, so they are unit-testable on their own.
  */
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { connectSrcOrigins } from "../capabilities/network/server.ts";
@@ -14,6 +14,8 @@ import type { FramePreambleConfig } from "../protocol/messages.ts";
 import type { ShellBoot } from "../shell/types.ts";
 import { mountAdminApi } from "./admin.ts";
 import { buildShellBoot } from "./boot.ts";
+import { usesTls } from "./config.ts";
+import { clientKey, CREDENTIAL_ATTEMPTS_PER_WINDOW, RateLimiter } from "./ratelimit.ts";
 import type { FrameApp, ServerContext } from "./types.ts";
 
 /** The documented reset the platform prepends to author content. */
@@ -252,13 +254,241 @@ function artifactIdFrom(host: string | undefined, header: string | undefined): s
   return header && isArtifactId(header) ? header : null;
 }
 
+/** Largest login body. The form has two short fields. */
+const MAX_LOGIN_BODY_BYTES = 4096;
+
+/** The login page and its answers: a decision surface, never framed or cached. */
+const LOGIN_HEADERS = {
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+} as const;
+
+/**
+ * A year of HSTS. It is sent only when the public origin is https, and then
+ * on both origins: the frame host is a wildcard sibling of the shell, so the
+ * shell's `includeSubDomains` only reaches it when they share a registrable
+ * domain — the frame says it for itself rather than relying on that.
+ */
+const HSTS = "max-age=31536000; includeSubDomains";
+
+const LOGIN_CSS = `:root{color-scheme:light dark}
+body{margin:0;display:grid;place-items:center;min-height:100vh;background:#faf9f5;color:#141413;
+font:14px/1.5 -apple-system,BlinkMacSystemFont,sans-serif}
+@media (prefers-color-scheme:dark){body{background:#1f1e1d;color:#f5f4ef}}
+form{display:grid;gap:8px;width:min(28rem,90vw)}
+input,button{font:inherit;padding:8px;border-radius:6px;border:1px solid #8883}
+.note{color:#a33;margin:0}`;
+
+/**
+ * The owner login form. `next` is echoed back into a hidden field (escaped)
+ * so a link into a page survives the login, exactly as the query form did.
+ */
+export function renderLoginPage(next: string | undefined, message: string | null): string {
+  const nextField = next ? `<input type="hidden" name="next" value="${escapeHtml(next)}">` : "";
+  return (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    "<title>Owner login</title>" +
+    `<style>${LOGIN_CSS}</style>` +
+    '</head><body><form method="post" action="/login">' +
+    "<h1>Owner login</h1>" +
+    (message ? `<p class="note">${escapeHtml(message)}</p>` : "") +
+    '<label for="token">Owner token (<code>ARTIFACT_OWNER_TOKEN</code>)</label>' +
+    '<input id="token" name="token" type="password" autocomplete="current-password" required>' +
+    nextField +
+    '<button type="submit">Log in</button>' +
+    "</form></body></html>"
+  );
+}
+
+/**
+ * The `next` a login may bounce to: our own origin, and path-shaped. The
+ * prefix of the *input* is not the test — `//evil.example/x` and
+ * `/\evil.example` both start with `/` and are read by a browser as another
+ * host, and `/..//evil.example/x` normalises into one — so the value is
+ * resolved against the shell origin and the string that is actually handed
+ * back is the one checked: resolution collapses dot segments, and a
+ * protocol-relative path can only appear after that.
+ */
+export function safeNext(next: string | undefined, shellOrigin: string): string | null {
+  if (!next || !next.startsWith("/")) return null;
+  let url: URL;
+  try {
+    url = new URL(next, shellOrigin);
+  } catch {
+    return null;
+  }
+  if (url.origin !== shellOrigin) return null;
+  const path = url.pathname + url.search;
+  if (path.startsWith("//") || path.startsWith("/\\")) return null;
+  return path;
+}
+
+/**
+ * The body as text, or `null` once it crosses the cap. A declared length is
+ * the fast path, but a TLS terminator may re-frame the operator's form as
+ * chunked, so a body that declares nothing is read with a running counter
+ * and cut off rather than refused (the same metering `mcp` does).
+ */
+async function readCappedBody(c: Context): Promise<string | null> {
+  const stream = c.req.raw.body;
+  if (!stream) {
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    return bytes.byteLength > MAX_LOGIN_BODY_BYTES ? null : new TextDecoder().decode(bytes);
+  }
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_LOGIN_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* already released by cancel() */
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * The posted credential. Both spellings a client would reach for are read —
+ * the form's `application/x-www-form-urlencoded` and `application/json` —
+ * and nothing else, so a cross-site "simple" `text/plain` post never lands
+ * here.
+ *
+ * A length over the cap is refused before a byte is read; anything else is
+ * metered as it arrives, so no client frames its way past the cap.
+ */
+async function readLoginBody(
+  c: Context,
+): Promise<{ token: string; next?: string } | { error: string; status: 400 | 413 | 415 }> {
+  const length = c.req.header("content-length");
+  if (length !== undefined) {
+    const declared = Number(length);
+    if (!Number.isInteger(declared) || declared < 0) {
+      return { error: "bad request body", status: 400 };
+    }
+    if (declared > MAX_LOGIN_BODY_BYTES) {
+      return { error: "the request body is too large", status: 413 };
+    }
+  }
+  const type = (c.req.header("content-type") ?? "").split(";")[0]?.trim().toLowerCase();
+  if (type !== "application/x-www-form-urlencoded" && type !== "application/json") {
+    return { error: "post the token as a form or as JSON", status: 415 };
+  }
+  const raw = await readCappedBody(c);
+  if (raw === null) return { error: "the request body is too large", status: 413 };
+  let token: unknown;
+  let next: unknown;
+  if (type === "application/json") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      return { error: "bad request body", status: 400 };
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      return { error: "bad request body", status: 400 };
+    }
+    ({ token, next } = parsed as { token?: unknown; next?: unknown });
+  } else {
+    const fields = new URLSearchParams(raw);
+    token = fields.get("token") ?? undefined;
+    next = fields.get("next") ?? undefined;
+  }
+  if (typeof token !== "string") return { error: "bad request body", status: 400 };
+  return typeof next === "string" ? { token, next } : { token };
+}
+
 export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
+  // Guessing the owner token is the one credential attack this server has,
+  // and it is a single secret. Only a *wrong* token spends budget: a flood
+  // of guesses must not lock the holder of the right one out, which behind a
+  // TLS terminator (where every request carries the proxy's address, so the
+  // whole internet shares one bucket) is the only outcome a global counter
+  // would have.
+  const loginLimit = new RateLimiter(CREDENTIAL_ATTEMPTS_PER_WINDOW);
+
+  // HSTS belongs on every response this origin makes, not just the ones that
+  // set cookies: `/` is the bare-host URL an operator hands out, so it is the
+  // first plain-http request an on-path attacker gets to hold. This runs
+  // before `mountCapabilityRoutes` (index.ts), so the slice routes are
+  // covered too — the same posture `mountFrameRoutes` takes.
+  app.use("*", async (c, next) => {
+    await next();
+    if (usesTls(ctx.config)) c.header("strict-transport-security", HSTS);
+  });
+
+  /**
+   * The form. It carries no token itself, so this page is safe to link, to
+   * bookmark and to log — which is the whole point of it existing.
+   */
+  const loginPage = (c: Context, message: string | null, status: 200 | 400) =>
+    c.html(
+      // Only a `next` this server would actually redirect to is carried into
+      // the form, so an off-origin one never reaches the operator's browser.
+      renderLoginPage(safeNext(c.req.query("next"), ctx.shellOrigin) ?? undefined, message),
+      status,
+      LOGIN_HEADERS,
+    );
+
   app.get("/login", (c) => {
-    const ok = ctx.auth.login(c, c.req.query("token") ?? "");
-    if (!ok) return c.text("invalid owner token", 403);
-    const next = c.req.query("next");
-    if (next && next.startsWith("/")) return c.redirect(next);
-    return c.text("logged in as the owner");
+    // A token in a query string is written to proxy and access logs and kept
+    // in browser history, so it is refused rather than honoured: the form
+    // below posts it in a body instead. The token in the URL the operator
+    // just used should be treated as burned and rotated.
+    if (c.req.query("token") !== undefined) {
+      return loginPage(c, "The owner token must not travel in a URL - paste it here instead.", 400);
+    }
+    return loginPage(c, null, 200);
+  });
+
+  app.post("/login", async (c) => {
+    // A login is state-changing and cookie-setting, so it is accepted only
+    // from this origin (or from a bare client, which sends neither header).
+    const origin = c.req.header("origin");
+    const site = c.req.header("sec-fetch-site");
+    if (
+      (origin !== undefined && origin !== ctx.shellOrigin) ||
+      (site !== undefined && site !== "same-origin" && site !== "none")
+    ) {
+      return c.text("cross-site login is refused", 403, LOGIN_HEADERS);
+    }
+    const body = await readLoginBody(c);
+    if ("error" in body) return c.text(body.error, body.status, LOGIN_HEADERS);
+    // The credential decides first, and only a wrong answer spends budget:
+    // the operator's correct token is never throttled by someone else's
+    // guessing, while guessing itself stays bounded.
+    if (!ctx.auth.login(c, body.token)) {
+      return loginLimit.allow(clientKey(c))
+        ? c.text("invalid owner token", 403, LOGIN_HEADERS)
+        : c.text("too many login attempts - wait a minute", 429, LOGIN_HEADERS);
+    }
+    // `next` is attacker-reachable: it survives from a link into the form's
+    // hidden field, so a bare `startsWith("/")` would make this an open
+    // redirect the operator walks into by typing their own token.
+    const target = safeNext(body.next ?? c.req.query("next"), ctx.shellOrigin);
+    if (target) return c.redirect(target, 303);
+    return c.text("logged in as the owner", 200, LOGIN_HEADERS);
   });
 
   app.get("/_shell/shell.js", async (c) => {
@@ -310,6 +540,7 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
     );
     c.header("x-content-type-options", "nosniff");
     c.header("referrer-policy", "no-referrer");
+    if (usesTls(ctx.config)) c.header("strict-transport-security", HSTS);
 
     // Identity on this origin is the signed asset token and nothing else. A
     // token that is forged, expired, or minted for another artifact is a hard

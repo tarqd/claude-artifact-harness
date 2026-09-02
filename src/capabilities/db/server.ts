@@ -412,10 +412,11 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
       socket.destroy();
       return;
     }
+    // The cookie names are `Auth`'s: they gain the `__Host-` prefix on https.
     const cookies = readCookies(request.headers.cookie);
-    const viewerId = ctx.auth.unseal(cookies.av);
-    const ownerId = ctx.auth.unseal(cookies.ao);
-    const isOwner = viewerId !== null && ownerId === viewerId;
+    const viewerId = ctx.auth.unseal(cookies[ctx.auth.viewerCookieName()]);
+    const isOwner =
+      viewerId !== null && ctx.auth.isOwnerCookie(cookies[ctx.auth.ownerCookieName()], viewerId);
 
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));

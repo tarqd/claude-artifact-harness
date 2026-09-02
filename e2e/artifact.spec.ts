@@ -10,6 +10,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer, type RunningServer } from "../src/server/index.ts";
+import { loginAsOwner as login } from "./login.ts";
 
 let server: RunningServer;
 let dataDir: string;
@@ -48,7 +49,7 @@ function frame(page: Page) {
 
 /** Only the owner (or an `admin` viewer) may write, so the browser logs in. */
 async function loginAsOwner(page: Page): Promise<void> {
-  await page.goto(`${server.shellOrigin}/login?token=${OWNER_TOKEN}`);
+  await login(page, server.shellOrigin, OWNER_TOKEN);
 }
 
 test.beforeAll(async () => {

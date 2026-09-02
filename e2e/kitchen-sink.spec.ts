@@ -16,6 +16,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer, type RunningServer } from "../src/server/index.ts";
+import { loginAsOwner as login } from "./login.ts";
 
 let server: RunningServer;
 let dataDir: string;
@@ -96,7 +97,7 @@ function frame(page: Page) {
 }
 
 async function open(page: Page, id: string): Promise<void> {
-  await page.goto(`${server.shellOrigin}/login?token=${OWNER_TOKEN}`);
+  await login(page, server.shellOrigin, OWNER_TOKEN);
   await page.goto(`${server.shellOrigin}/a/${id}`);
   await expect(page.locator("iframe#frame-content.ready")).toHaveCount(1, { timeout: 15_000 });
   await expect(frame(page).locator("#ns")).toHaveAttribute("data-state", "resolved", {

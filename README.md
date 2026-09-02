@@ -115,6 +115,55 @@ off unless `ARTIFACT_PREFIX_HOSTS=1` asks for it: artifacts opened that way
 all share one browser origin, which is the isolation the per-artifact host
 exists to give them.
 
+Both origins are built from configuration, not from the request, because
+they end up inside security headers (`frame-ancestors`, the preamble's
+allowed origins) — a `Host` or `X-Forwarded-Proto` a client chose must never
+decide what the CSP says.
+
+### Behind TLS
+
+**A bind that is not loopback must sit behind a TLS terminator.** The
+viewer and owner cookies and the owner token itself are otherwise sent in
+clear text, and anyone on the path can read or replace them. Terminate TLS
+in front (nginx, Caddy, a tunnel) and tell the server the origin browsers
+actually reach:
+
+```
+BIND_HOST=0.0.0.0
+PUBLIC_SHELL_URL=https://artifacts.example.com     # shell origin, no port = :443
+FRAME_HOST_SUFFIX=artifacts.example.com            # frame is <artifactId>.<suffix>
+ARTIFACT_SECRET=<32+ random bytes>                 # or cookies die on every restart
+ARTIFACT_OWNER_TOKEN=<a long random string>
+```
+
+`PUBLIC_SHELL_URL` being `https:` is the single switch: the two origins are
+built with it, the viewer and owner cookies become `Secure` and gain the
+`__Host-` prefix (which a sibling host under the same registrable domain
+cannot toss at us), `frame-ancestors` names the https shell, and both
+origins send `Strict-Transport-Security: max-age=31536000; includeSubDomains`
+so the *next* bare-host visit never leaves as plain http. The frame origin
+needs wildcard DNS (`*.artifacts.example.com`) and the same certificate; the
+terminator must pass the host through unchanged. `npm start` prints a
+warning when it is bound wide open on plain http.
+
+**Throwing the switch changes who your visitors are.** The `__Host-` prefix
+is a new cookie name, so every browser holding an `av` cookie becomes a
+brand-new viewer: it gets a fresh id and its `data/users/<oldId>/…` rows,
+its `user` profile and its room identity are no longer its own. Flip the
+scheme before a deployment has real users, or migrate the ids deliberately.
+Every owner must also log in again — the owner cookie is bound to the token
+it was minted under (rotating `ARTIFACT_OWNER_TOKEN` ends every owner
+session for the same reason).
+
+The login form itself is `POST /login`, accepted only from the shell origin
+and given a small per-address budget for *wrong* tokens — a correct one is
+never throttled, since behind a terminator every request arrives from the
+proxy's address and a budget that counted successes would be a remote
+lockout of the operator rather than a brake on guessing. The admin API's
+`Authorization: Bearer <ARTIFACT_OWNER_TOKEN>` is the same credential and
+gets its own budget on the same terms (a spent one answers `429`), so the
+bearer guard is not an unthrottled oracle for the token the form throttles.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -123,14 +172,18 @@ exists to give them.
 | `FRAME_PORT` | `8788` | frame origin port |
 | `SHELL_HOST` | `localhost` | hostname the shell is reached at |
 | `FRAME_HOST_SUFFIX` | `localhost` | suffix after `<artifactId>.` for the frame origin |
+| `PUBLIC_SHELL_URL` | unset | the origin browsers reach the shell at, e.g. `https://artifacts.example.com`. Sets the scheme, host and port of both public origins; `https` also makes the cookies `Secure` and `__Host-` prefixed. A bare origin only — no path or query |
+| `PUBLIC_SCHEME` | `http` | scheme for the public origins when there is no `PUBLIC_SHELL_URL` (`http` or `https`). `X-Forwarded-Proto` is deliberately not trusted: it is a client-settable header, and these strings land in security headers |
+| `PUBLIC_SHELL_PORT` | the listening port | port the shell's public origin carries; `443`/`80` renders as no port at all |
+| `PUBLIC_FRAME_PORT` | the listening port | the same for the frame origin. A `PUBLIC_SHELL_URL` with no port implies the scheme's default here too — one terminator in front of both |
 | `DATA_DIR` | `./data` | filesystem store root |
 | `DIST_DIR` | `./dist` | where the built client bundles are read from |
 | `ARTIFACT_SECRET` | random per boot | HMAC secret for the viewer cookie and asset tokens |
-| `ARTIFACT_OWNER_TOKEN` | unset | `/login?token=…` promotes a browser to owner; also guards the admin API as `Authorization: Bearer …` |
+| `ARTIFACT_OWNER_TOKEN` | unset | posted to `/login` it promotes a browser to owner; also guards the admin API as `Authorization: Bearer …`. The owner cookie is bound to it, so rotating it logs every owner session out |
 | `ARTIFACT_OPEN_ADMIN` | unset | `1` serves the admin API (create/publish) to callers with no credential — local dev only |
 | `ARTIFACT_PREFIX_HOSTS` | unset | `1` serves the frame origin's `/_a/<artifactId>/…` tooling form on hosts with no artifact label — every artifact reached that way shares one origin |
 | `ARTIFACT_DEFAULT_LEVEL` | `interact` | level for other viewers: `view`, `interact` or `admin`. Only `admin` (and the owner) may publish |
-| `BIND_HOST` | `127.0.0.1` | address both apps listen on; set to `0.0.0.0` to expose them |
+| `BIND_HOST` | `127.0.0.1` | address both apps listen on; set to `0.0.0.0` to expose them — only behind TLS, with `PUBLIC_SHELL_URL` set (see "Behind TLS") |
 | `ARTIFACT_TOKEN_TTL` | `1800` | asset-token lifetime, seconds |
 | `VERSION_POLL_MS` | `5000` | how often an open view polls for a new version (0 disables) |
 | `ANTHROPIC_API_KEY` | unset | the key `sample` calls the Anthropic API with. Without it (and without `SAMPLE_BACKEND=fake`) every `sample` call is refused `sampling_disabled` |
@@ -152,8 +205,9 @@ Shell origin:
 |---|---|
 | `GET /a/:id` | the shell page (boot record + shell bundle) |
 | `GET /_shell/shell.js` | the shell bundle |
-| `GET /login?token=…` | owner login |
-| `POST /api/artifacts` | create from HTML + capabilities |
+| `GET /login` | the owner login form (never carries the token; a `?token=` is refused) |
+| `POST /login` | owner login: `token` as a form field or JSON, same-origin, throttled per address |
+| `POST /api/artifacts` | create from HTML + capabilities (owner cookie or bearer token; wrong bearers are throttled per address) |
 | `GET /api/artifacts/:id` | metadata and file list |
 | `GET /api/artifacts/:id/version` | the live version (drives live reload) |
 | `POST /api/artifacts/:id/publish` | owner publish (compare-and-set) |

@@ -24,7 +24,7 @@ import {
   normalizeQuery,
 } from "./identity.ts";
 import { isArtifactId, isUserId } from "../../protocol/paths.ts";
-import { VIEWER_COOKIE } from "../../server/auth.ts";
+import { clientKey, RateLimiter } from "../../server/ratelimit.ts";
 import type { ServerApps, ServerContext } from "../../server/types.ts";
 import type { ArtifactMeta } from "../../server/store.ts";
 import { UserStore, type StoredProfile } from "./store.ts";
@@ -32,44 +32,13 @@ import { UserStore, type StoredProfile } from "./store.ts";
 /** The scope a page gets without asking. `email` must be declared. */
 const DEFAULT_SCOPES = ["profile"] as const;
 
-/** Rate-limit window, and the two budgets inside it, per client address. */
-export const RATE_WINDOW_MS = 60_000;
+/** The two budgets inside the spine's rate-limit window, per client address. */
 export const NAME_WRITES_PER_WINDOW = 60;
 export const JOIN_WRITES_PER_WINDOW = 240;
 
-/**
- * A coarse fixed-window limiter, keyed by client address. It is not a load
- * balancer: it exists so a script cannot mint identities or peer rows in a
- * loop faster than a person browsing ever would.
- */
-export class RateLimiter {
-  private readonly hits = new Map<string, { count: number; resetAt: number }>();
-
-  constructor(
-    private readonly limit: number,
-    private readonly windowMs: number = RATE_WINDOW_MS,
-  ) {}
-
-  allow(key: string, now: number = Date.now()): boolean {
-    const slot = this.hits.get(key);
-    if (!slot || slot.resetAt <= now) {
-      // Bounded memory: a flood of distinct addresses resets the table
-      // rather than growing it without end.
-      if (this.hits.size >= 4096) this.hits.clear();
-      this.hits.set(key, { count: 1, resetAt: now + this.windowMs });
-      return true;
-    }
-    slot.count += 1;
-    return slot.count <= this.limit;
-  }
-}
-
-/** The address this request came from; one bucket for everything unknown. */
-function clientKey(c: Context): string {
-  const env = c.env as { incoming?: { socket?: { remoteAddress?: unknown } } } | null | undefined;
-  const address = env?.incoming?.socket?.remoteAddress;
-  return typeof address === "string" && address ? address : "unknown";
-}
+// The limiter itself lives in the spine (`server/ratelimit.ts`): login uses
+// the same one. Re-exported here so this slice's tests keep one import.
+export { RateLimiter, RATE_WINDOW_MS } from "../../server/ratelimit.ts";
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
@@ -121,7 +90,7 @@ export function routes(apps: ServerApps, ctx: ServerContext): void {
    * opening a page, so a cookieless client cannot write anything here.
    */
   const session = (c: Context): string | null => {
-    const id = ctx.auth.unseal(getCookie(c, VIEWER_COOKIE));
+    const id = ctx.auth.unseal(getCookie(c, ctx.auth.viewerCookieName()));
     return id !== null && isUserId(id) ? id : null;
   };
 

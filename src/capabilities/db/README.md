@@ -76,7 +76,8 @@ lane too, and the refresh timer stops as soon as nothing is subscribed.
 - `POST /api/frame/db/:id/call` (verbs), `POST /api/frame/db/:id/subscribe`
   (mints a signed lane grant for ONE subscription id), `WS /api/frame/db/ws` —
   all on the shell origin. The lane checks `Origin`, reads identity from the
-  `av`/`ao` cookie pair exactly as the HTTP path does, and refuses a grant
+  `av`/`ao` cookie pair (`__Host-` prefixed on https, and read through
+  `Auth`, never by name) exactly as the HTTP path does, and refuses a grant
   minted for another viewer, artifact or subscription id, so a frame-origin
   page cannot reach another artifact's rows and one grant cannot be replayed
   into unbounded subscriptions.

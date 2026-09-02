@@ -78,8 +78,17 @@ class Client {
     return { status: response.status, body: text ? JSON.parse(text) : null };
   }
 
+  /** The owner token is posted, never put in a URL (security review, 9). */
   async login(): Promise<void> {
-    await this.get(`/login?token=${OWNER_TOKEN}`);
+    const response = await fetch(`${server.shellOrigin}/login`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        ...(this.cookie ? { cookie: this.cookie } : {}),
+      },
+      body: new URLSearchParams({ token: OWNER_TOKEN }).toString(),
+    });
+    this.absorb(response);
   }
 
   async id(): Promise<string> {

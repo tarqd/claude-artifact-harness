@@ -27,10 +27,16 @@ class Client {
   cookie = "";
 
   private absorb(response: Response): void {
+    // The names are `Auth`'s: they gain the `__Host-` prefix on https, so
+    // this client keeps working if the suite is ever run over one.
+    const keep = new Set([
+      server.context.auth.viewerCookieName(),
+      server.context.auth.ownerCookieName(),
+    ]);
     for (const raw of response.headers.getSetCookie()) {
       const pair = raw.split(";")[0] ?? "";
       const name = pair.split("=")[0] ?? "";
-      if (name !== "av" && name !== "ao") continue;
+      if (!keep.has(name)) continue;
       const kept = this.cookie.split("; ").filter((c) => c && !c.startsWith(`${name}=`));
       kept.push(pair);
       this.cookie = kept.join("; ");
@@ -41,9 +47,12 @@ class Client {
     return this.cookie ? { ...extra, cookie: this.cookie } : extra;
   }
 
+  /** The owner token is posted, never put in a URL (security review, 9). */
   async login(): Promise<void> {
-    const response = await fetch(`${server.shellOrigin}/login?token=${OWNER_TOKEN}`, {
-      headers: this.headers(),
+    const response = await fetch(`${server.shellOrigin}/login`, {
+      method: "POST",
+      headers: this.headers({ "content-type": "application/x-www-form-urlencoded" }),
+      body: new URLSearchParams({ token: OWNER_TOKEN }).toString(),
       redirect: "manual",
     });
     this.absorb(response);

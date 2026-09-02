@@ -9,6 +9,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer, type RunningServer } from "../src/server/index.ts";
+import { loginAsOwner as login } from "./login.ts";
 
 let server: RunningServer;
 let dataDir: string;
@@ -226,7 +227,7 @@ test("an admin viewer may send on an admin-only topic", async ({ browser }) => {
   const context = await browser.newContext();
   const page = await context.newPage();
   // The owner token makes this browser the owner of every artifact.
-  await page.goto(`${server.shellOrigin}/login?token=${OWNER_TOKEN}`);
+  await login(page, server.shellOrigin, OWNER_TOKEN);
   await openView(page, id);
 
   const outcome = await content(page).evaluate(async () => {

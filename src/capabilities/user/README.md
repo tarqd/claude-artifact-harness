@@ -101,7 +101,8 @@ Every route but the bare `GET /api/account` refuses a request that carries no
 viewer cookie. Identity is minted by reading your own account (what opening a
 page does), never by posting at a write endpoint, so a cookieless client can
 neither name itself nor touch a directory. Writes are rate-limited per client
-address.
+address, with the spine's fixed-window limiter (`server/ratelimit.ts`, shared
+with owner login), 60 name writes and 240 joins a minute.
 
 Joining a peer list takes more than a cookie. The broker forwards the signed
 asset token from the boot record in `x-artifact-frame-token`, and the backend

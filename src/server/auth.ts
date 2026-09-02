@@ -9,16 +9,29 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import type { Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { mintUserId, isUserId } from "../protocol/paths.ts";
-import type { ServerConfig, SharingLevel } from "./config.ts";
+import { usesTls, type ServerConfig, type SharingLevel } from "./config.ts";
 import type { ArtifactMeta } from "./store.ts";
 
+/**
+ * Cookie names. Over https both gain the `__Host-` prefix, which a browser
+ * only accepts with `Secure`, `Path=/` and no `Domain` — so a sibling host
+ * under a shared registrable domain cannot toss one at the shell (this is
+ * also why the names are read through `Auth`, never hardcoded by a slice).
+ */
 export const VIEWER_COOKIE = "av";
 export const OWNER_COOKIE = "ao";
+const HOST_PREFIX = "__Host-";
+
+/** A year: the viewer id is a label, not a credential with a session. */
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 
 export interface Viewer {
   id: string;
   isOwner: boolean;
 }
+
+/** What the admin guard decided: serve, refuse, or refuse and slow down. */
+export type AdminDecision = "allow" | "deny" | "throttled";
 
 export interface AssetTokenClaims {
   viewerId: string;
@@ -27,7 +40,45 @@ export interface AssetTokenClaims {
 }
 
 export class Auth {
-  constructor(private readonly config: ServerConfig) {}
+  private readonly secure: boolean;
+  private readonly viewerCookie: string;
+  private readonly ownerCookie: string;
+
+  constructor(private readonly config: ServerConfig) {
+    this.secure = usesTls(config);
+    this.viewerCookie = this.secure ? HOST_PREFIX + VIEWER_COOKIE : VIEWER_COOKIE;
+    this.ownerCookie = this.secure ? HOST_PREFIX + OWNER_COOKIE : OWNER_COOKIE;
+  }
+
+  /** The viewer cookie's name on this deployment (`__Host-` prefixed on https). */
+  viewerCookieName(): string {
+    return this.viewerCookie;
+  }
+
+  /** The owner cookie's name on this deployment. */
+  ownerCookieName(): string {
+    return this.ownerCookie;
+  }
+
+  /**
+   * `Secure` whenever the public origin is https, so the session never
+   * travels in clear text, and `__Host-` needs it anyway.
+   */
+  private cookieOptions(): {
+    path: string;
+    httpOnly: true;
+    sameSite: "Lax";
+    secure: boolean;
+    maxAge: number;
+  } {
+    return {
+      path: "/",
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: this.secure,
+      maxAge: COOKIE_MAX_AGE,
+    };
+  }
 
   private sign(value: string): string {
     return createHmac("sha256", this.config.secret).update(value).digest("base64url");
@@ -52,31 +103,55 @@ export class Auth {
 
   /** Read the viewer cookie, minting and setting one when absent. */
   viewer(c: Context): Viewer {
-    const existing = this.unseal(getCookie(c, VIEWER_COOKIE));
+    const existing = this.unseal(getCookie(c, this.viewerCookie));
     const id = isUserId(existing) ? existing : mintUserId();
     if (id !== existing) {
-      setCookie(c, VIEWER_COOKIE, this.seal(id), {
-        path: "/",
-        httpOnly: true,
-        sameSite: "Lax",
-        maxAge: 60 * 60 * 24 * 365,
-      });
+      setCookie(c, this.viewerCookie, this.seal(id), this.cookieOptions());
     }
-    const owner = this.unseal(getCookie(c, OWNER_COOKIE));
-    return { id, isOwner: owner === id };
+    return { id, isOwner: this.isOwnerCookie(getCookie(c, this.ownerCookie), id) };
   }
 
-  /** `/login?token=<ARTIFACT_OWNER_TOKEN>` promotes this browser to owner. */
+  /**
+   * A fingerprint of the owner token as it is right now. It rides inside the
+   * sealed owner cookie, so rotating `ARTIFACT_OWNER_TOKEN` (or clearing it)
+   * ends every owner session instead of leaving year-long cookies that the
+   * rotation was meant to revoke.
+   */
+  private ownerFingerprint(): string | null {
+    const token = this.config.ownerToken;
+    return token ? this.sign(`owner-token:${token}`).slice(0, 22) : null;
+  }
+
+  /** Is this sealed owner cookie this viewer's, and minted under this token? */
+  isOwnerCookie(sealed: string | undefined, viewerId: string): boolean {
+    const value = this.unseal(sealed);
+    if (value === null || viewerId === "") return false;
+    const cut = value.lastIndexOf(".");
+    // No fingerprint at all is a cookie from before the binding existed: it
+    // is not evidence of the current token, so it is not the owner.
+    if (cut <= 0) return false;
+    const expected = this.ownerFingerprint();
+    if (expected === null) return false;
+    return value.slice(0, cut) === viewerId && secretEquals(value.slice(cut + 1), expected);
+  }
+
+  /**
+   * The owner cookie's value for this viewer under the current token, or
+   * `null` when no owner token is configured (then nobody can be the owner).
+   */
+  sealOwnerCookie(viewerId: string): string | null {
+    const fingerprint = this.ownerFingerprint();
+    return fingerprint === null ? null : this.seal(`${viewerId}.${fingerprint}`);
+  }
+
+  /** `POST /login` with `ARTIFACT_OWNER_TOKEN` promotes this browser to owner. */
   login(c: Context, token: string): boolean {
     const expected = this.config.ownerToken;
     if (!expected || !secretEquals(token, expected)) return false;
     const viewer = this.viewer(c);
-    setCookie(c, OWNER_COOKIE, this.seal(viewer.id), {
-      path: "/",
-      httpOnly: true,
-      sameSite: "Lax",
-      maxAge: 60 * 60 * 24 * 365,
-    });
+    const sealed = this.sealOwnerCookie(viewer.id);
+    if (sealed === null) return false;
+    setCookie(c, this.ownerCookie, sealed, this.cookieOptions());
     return true;
   }
 
@@ -114,16 +189,29 @@ export class Auth {
     return { viewerId, artifactId, expiresAt };
   }
 
-  /** Admin API guard: the owner cookie, or the owner token as a bearer. */
-  isAdminRequest(c: Context): boolean {
+  /**
+   * Admin API guard: the owner cookie, or the owner token as a bearer.
+   *
+   * `spendGuess` is the caller's budget for *wrong* bearer tokens, and is
+   * consulted only on that branch — the same shape the login form takes.
+   * Without it this door would be an unthrottled yes/no oracle for the one
+   * master credential, reachable by anyone who can reach the server; with it
+   * a correct token (the publish script, CI, the operator's browser — all of
+   * which share the terminator's address) is never spent against.
+   */
+  isAdminRequest(c: Context, spendGuess?: (c: Context) => boolean): AdminDecision {
     const viewer = this.viewer(c);
-    if (viewer.isOwner) return true;
+    if (viewer.isOwner) return "allow";
     const expected = this.config.ownerToken;
     const header = c.req.header("authorization") ?? "";
-    if (expected && secretEquals(header, `Bearer ${expected}`)) return true;
+    if (expected && secretEquals(header, `Bearer ${expected}`)) return "allow";
     // Without a credential the admin API is open only when explicitly opened
     // (`ARTIFACT_OPEN_ADMIN=1`): it creates and publishes artifacts.
-    return this.config.openAdminApi;
+    if (this.config.openAdminApi) return "allow";
+    // A wrong `Authorization` is a guess at the owner token; no header at all
+    // is an ordinary anonymous caller and costs nothing.
+    if (header !== "" && spendGuess && !spendGuess(c)) return "throttled";
+    return "deny";
   }
 }
 

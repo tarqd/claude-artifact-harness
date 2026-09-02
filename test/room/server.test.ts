@@ -52,7 +52,17 @@ class Lane {
     if (origin !== null) headers.origin = origin;
     if (viewerId !== null) {
       const sealed = encodeURIComponent(server.context.auth.seal(viewerId));
-      headers.cookie = options.owner ? `av=${sealed}; ao=${sealed}` : `av=${sealed}`;
+      // The owner cookie is bound to the owner token in force, so it is
+      // minted the way `Auth.login` mints it, not from the viewer id alone.
+      const owner = encodeURIComponent(server.context.auth.sealOwnerCookie(viewerId) ?? "");
+      // Names as well as values come from the accessors: they change with the
+      // scheme (`__Host-` under https), so hardcoding them would send cookies
+      // the lane no longer reads the moment this suite is pointed at tls.
+      const viewerName = server.context.auth.viewerCookieName();
+      const ownerName = server.context.auth.ownerCookieName();
+      headers.cookie = options.owner
+        ? `${viewerName}=${sealed}; ${ownerName}=${owner}`
+        : `${viewerName}=${sealed}`;
     }
     this.socket = new WebSocket(
       `${base.origin}/api/frame/room/ws?artifact=${artifactId}&peer=${this.peer}`,
