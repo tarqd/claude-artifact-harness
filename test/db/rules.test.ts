@@ -105,7 +105,10 @@ describe("{self} under any prefix", () => {
     expect(compileRules(half).errors[0]).toMatch(/must set both read and write/);
     expect(can(half, `data/users/${A}/profile`, "read", viewer(B, "interact"))).toBe(false);
     expect(can(half, `data/users/${A}/profile`, "write", viewer(B, "interact"))).toBe(false);
-    expect(can(half, `data/users/${B}/profile`, "write", viewer(B, "interact"))).toBe(true);
+    // The refusal closes the view, so not even a viewer's own subtree is
+    // writable below `owner` until the declaration is fixed.
+    expect(can(half, `data/users/${B}/profile`, "write", viewer(B, "interact"))).toBe(false);
+    expect(can(half, `data/users/${B}/profile`, "write", viewer(B, "owner"))).toBe(true);
   });
 
   it("opens data/users when the declaration sets both levels", () => {
@@ -124,9 +127,9 @@ describe("{self} under any prefix", () => {
     };
     const compiled = compileRules(half);
     expect(compiled.errors[0]).toMatch(/must set both read and write/);
-    // A refused declaration falls back to the defaults, never to something
-    // looser than what was asked for.
-    expect(can(half, `votes/${A}`, "write", viewer(A, "interact"))).toBe(true);
+    // A refused declaration closes the view, never falls back to the
+    // defaults: the defaults are looser than the declaration asked for.
+    expect(can(half, `votes/${A}`, "write", viewer(A, "interact"))).toBe(false);
     expect(can(half, `data/users/${A}/x`, "read", viewer(B, "interact"))).toBe(false);
   });
 });
@@ -149,5 +152,45 @@ describe("declaration validation", () => {
 
   it("treats {db: {}} as the defaults", () => {
     expect(compileRules({}).rules).toEqual(compileRules({ rules: [] }).rules);
+  });
+});
+
+describe("a declaration that does not compile", () => {
+  // One typo used to discard the whole declaration and run the DEFAULTS, so
+  // a locked-down author ended up with root `write: "interact"` for every
+  // anonymous viewer. A refused declaration is closed, not default.
+  const oneTypo = {
+    rules: [
+      { path: "", read: "view", write: "owner" },
+      { path: "bad path!", read: "view" },
+    ],
+  };
+
+  it("closes every path instead of falling back to the defaults", () => {
+    expect(compileRules(oneTypo).errors[0]).toMatch(/is not a rule path/);
+    expect(can(oneTypo, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(oneTypo, "t/1", "write", viewer(null, "interact"))).toBe(false);
+    expect(can(oneTypo, "t/1", "read", viewer(A, "admin"))).toBe(false);
+    // The owner can still reach the store to repair it.
+    expect(can(oneTypo, "t/1", "read", viewer(A, "owner"))).toBe(true);
+    expect(can(oneTypo, "t/1", "write", viewer(A, "owner"))).toBe(true);
+  });
+
+  it("keeps {self} privacy while closed", () => {
+    expect(can(oneTypo, `data/users/${A}/profile`, "read", viewer(B, "owner"))).toBe(false);
+    expect(can(oneTypo, `data/users/${A}/profile`, "read", viewer(A, "owner"))).toBe(true);
+  });
+
+  it("closes on a rule list over the cap too", () => {
+    const many = { rules: Array.from({ length: 65 }, (_, i) => ({ path: `c${i}`, read: "view" })) };
+    expect(can(many, "t/1", "write", viewer(A, "interact"))).toBe(false);
+  });
+
+  it("leaves a declaration that does compile on exactly what it asked for", () => {
+    const fixed = { rules: [{ path: "", read: "view", write: "owner" }] };
+    expect(compileRules(fixed).errors).toEqual([]);
+    expect(can(fixed, "t/1", "read", viewer(null, "interact"))).toBe(true);
+    expect(can(fixed, "t/1", "write", viewer(A, "interact"))).toBe(false);
+    expect(can(fixed, "t/1", "write", viewer(A, "owner"))).toBe(true);
   });
 });

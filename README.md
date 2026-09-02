@@ -153,7 +153,7 @@ Shell origin:
 | `GET /a/:id` | the shell page (boot record + shell bundle) |
 | `GET /_shell/shell.js` | the shell bundle |
 | `GET /login?token=…` | owner login |
-| `POST /api/artifacts` | create from HTML + capabilities |
+| `POST /api/artifacts` | create from HTML + capabilities (a declaration a slice cannot run is refused, 400 `invalid_content`) |
 | `GET /api/artifacts/:id` | metadata and file list |
 | `GET /api/artifacts/:id/version` | the live version (drives live reload) |
 | `POST /api/artifacts/:id/publish` | owner publish (compare-and-set) |

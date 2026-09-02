@@ -1,6 +1,7 @@
 /**
- * Mounts every slice's `server.ts`. Like `src/shell/registry.ts`, this is the
- * one spine file that names the slices; a slice only edits its own directory.
+ * Mounts every slice's `server.ts`, and asks each one whether it can run the
+ * config an author declared. Like `src/shell/registry.ts`, this is the one
+ * spine file that names the slices; a slice only edits its own directory.
  */
 import * as artifact from "../capabilities/artifact/server.ts";
 import * as assets from "../capabilities/assets/server.ts";
@@ -33,4 +34,24 @@ export function mountCapabilityRoutes(apps: ServerApps, ctx: ServerContext): voi
   for (const [, slice] of SLICES) {
     slice.routes?.(apps, ctx);
   }
+}
+
+/**
+ * What is wrong with a capability declaration, asked of each declared slice
+ * that cares (`CapabilityServer.validateConfig`). The admin API refuses a
+ * create when this is non-empty: a slice that closes itself over a broken
+ * config would otherwise do so silently, long after publish.
+ */
+export function validateCapabilityDeclaration(
+  capabilities: Record<string, { config?: unknown }>,
+): string[] {
+  const problems: string[] = [];
+  for (const [name, slice] of SLICES) {
+    const entry = capabilities[name];
+    if (!entry || !slice.validateConfig) continue;
+    for (const message of slice.validateConfig(entry.config)) {
+      problems.push(`${name}: ${message}`);
+    }
+  }
+  return problems;
 }

@@ -5,7 +5,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { startServer, type RunningServer } from "../../src/server/index.ts";
 
@@ -59,6 +59,7 @@ async function createArtifact(capabilities: Record<string, unknown>): Promise<st
 class Lane {
   private readonly queue: any[] = [];
   private waiting: ((value: any) => void) | null = null;
+  private lastRows = "";
   readonly socket: WebSocket;
 
   constructor(artifactId: string, cookie: string, origin?: string) {
@@ -88,6 +89,24 @@ class Lane {
     return new Promise((resolve) => {
       this.waiting = resolve;
     });
+  }
+
+  /**
+   * The next delivery that is not a repeat of the row set just delivered.
+   * The lane pushes the current rows, not a delta, so a write coalesced
+   * just before this subscription started can repeat a snapshot the client
+   * already holds. The broker diffs that away; a test must not read it as
+   * the answer to the next write.
+   */
+  async nextRows(): Promise<any> {
+    for (;;) {
+      const message = await this.next();
+      if (message.kind !== "rows") return message;
+      const rows = JSON.stringify(message.docs);
+      if (rows === this.lastRows) continue;
+      this.lastRows = rows;
+      return message;
+    }
   }
 
   send(message: unknown): void {
@@ -226,6 +245,91 @@ describe("the call endpoint", () => {
   });
 });
 
+describe("a rule declaration that does not compile", () => {
+  /** The declaration from the finding: a locked-down root plus one typo. */
+  const oneTypo = {
+    rules: [
+      { path: "", read: "view", write: "owner" },
+      { path: "bad path!", read: "view" },
+    ],
+  };
+
+  async function create(capabilities: Record<string, unknown>) {
+    const response = await fetch(`${server.shellOrigin}/api/artifacts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ html: HTML, capabilities }),
+    });
+    return { status: response.status, body: (await response.json()) as any };
+  }
+
+  it("is refused at POST /api/artifacts, naming the rule", async () => {
+    const refused = await create({ db: { config: oneTypo } });
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe("invalid_content");
+    expect(refused.body.message).toMatch(/db: rule 1: "bad path!" is not a rule path/);
+
+    // The same declaration without the typo is still published and still runs.
+    const accepted = await create({
+      db: { config: { rules: [{ path: "", read: "view", write: "owner" }] } },
+    });
+    expect(accepted.status).toBe(200);
+    const viewer = new Client();
+    const write = await viewer.call(accepted.body.id, {
+      verb: "set",
+      path: "t/1",
+      body: { a: 1 },
+    });
+    expect(write.status).toBe(400);
+    expect(write.body.message).toMatch(/owner sharing level/);
+    expect((await viewer.call(accepted.body.id, { verb: "get", path: "t/1" })).body.exists).toBe(
+      false,
+    );
+  });
+
+  it("closes the store when one is already stored, and warns once", async () => {
+    // Published before the check existed (or written straight to disk): the
+    // view must close, not fall back to the permissive defaults.
+    const owner = "u_" + "c".repeat(22);
+    const meta = await server.context.store.createArtifact({
+      html: HTML,
+      capabilities: { db: { config: oneTypo } },
+      owner,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const viewer = new Client();
+      const write = await viewer.call(meta.id, { verb: "set", path: "t/1", body: { a: 1 } });
+      expect(write.status).toBe(400);
+      expect(write.body.code).toBe("invalid_argument");
+      expect((await viewer.call(meta.id, { verb: "get", path: "t/1" })).body).toEqual({
+        id: "1",
+        exists: false,
+      });
+      expect((await viewer.call(meta.id, { verb: "query", spec: { collection: "t" } })).body.docs)
+        .toEqual([]);
+
+      // One warning for this artifact, however many calls land on it.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(meta.id);
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/is not a rule path/);
+    } finally {
+      warn.mockRestore();
+    }
+
+    // The owner still reaches the store, so a bad declaration is repairable.
+    const sealed = encodeURIComponent(server.context.auth.seal(owner));
+    const asOwner = (body: unknown) =>
+      fetch(`${server.shellOrigin}/api/frame/db/${meta.id}/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: `av=${sealed}; ao=${sealed}` },
+        body: JSON.stringify(body),
+      }).then(async (r) => ({ status: r.status, body: (await r.json()) as any }));
+    expect((await asOwner({ verb: "set", path: "t/1", body: { a: 1 } })).status).toBe(200);
+    expect((await asOwner({ verb: "get", path: "t/1" })).body.data).toEqual({ a: 1 });
+  });
+});
+
 describe("the realtime lane", () => {
   it("delivers rows on subscribe and on another viewer's write", async () => {
     const id = await createArtifact({ db: {} });
@@ -246,7 +350,7 @@ describe("the realtime lane", () => {
     await lane.open();
     lane.send({ kind: "sub", subId: "s1", grant: granted.body.grant });
 
-    const first = await lane.next();
+    const first = await lane.nextRows();
     expect(first).toEqual({
       kind: "rows",
       subId: "s1",
@@ -254,12 +358,12 @@ describe("the realtime lane", () => {
     });
 
     await alice.call(id, { verb: "set", path: "tasks/t2", body: { title: "two" } });
-    const second = await lane.next();
+    const second = await lane.nextRows();
     expect(second.kind).toBe("rows");
     expect(second.docs.map((d: { id: string }) => d.id)).toEqual(["t1", "t2"]);
 
     await alice.call(id, { verb: "delete", path: "tasks/t1" });
-    const third = await lane.next();
+    const third = await lane.nextRows();
     expect(third.docs.map((d: { id: string }) => d.id)).toEqual(["t2"]);
 
     lane.close();

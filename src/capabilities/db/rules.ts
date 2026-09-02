@@ -10,6 +10,11 @@
  * (`read: "view"`, `write: "interact"`) and the platform's private
  * `data/users/{self}`. `{db: {}}` therefore restores exactly the defaults.
  *
+ * A declaration that does not compile is never run and never falls back to
+ * those defaults: the view closes to `owner`/`owner` (see `closed()`), and
+ * the caller reports the errors. `POST /api/artifacts` refuses such a
+ * declaration outright, so an author sees the typo at publish.
+ *
  * Pure module: no I/O, so the server and the tests share one implementation.
  */
 import {
@@ -58,7 +63,7 @@ export interface CompiledRule {
 
 export interface CompiledRules {
   rules: CompiledRule[];
-  /** Why a declaration was refused. A non-empty list means the defaults ran. */
+  /** Why a declaration was refused. A non-empty list means the closed rules ran. */
   errors: string[];
 }
 
@@ -76,7 +81,22 @@ function defaults(): CompiledRule[] {
   ];
 }
 
-/** The rules a view runs under, or the defaults when the declaration is bad. */
+/**
+ * What a declaration that could not be compiled runs under: nothing below
+ * `owner` reads or writes anything. The defaults are NOT the safe answer
+ * here — root `write: "interact"` is what `{db: {}}` asks for, not what a
+ * typo in one rule of a locked-down declaration asks for, and falling back
+ * to them turns a mistake into an open database. The `data/users/{self}`
+ * privacy rule stays, so a fallback never widens that prefix either.
+ */
+function closed(): CompiledRule[] {
+  return [
+    { segs: [], self: false, read: "owner", write: "owner", declared: false },
+    { segs: ["data", "users"], self: true, read: null, write: null, declared: false },
+  ];
+}
+
+/** The rules a view runs under, or the closed rules when the declaration is bad. */
 export function compileRules(config: unknown): CompiledRules {
   const rules = defaults();
   const errors: string[] = [];
@@ -84,7 +104,7 @@ export function compileRules(config: unknown): CompiledRules {
   const declared = readRuleList(config);
   if (declared === null) return { rules, errors };
   if (declared.length > MAX_RULES) {
-    return { rules: defaults(), errors: [`at most ${MAX_RULES} rules may be declared`] };
+    return { rules: closed(), errors: [`at most ${MAX_RULES} rules may be declared`] };
   }
 
   const added: CompiledRule[] = [];
@@ -113,7 +133,7 @@ export function compileRules(config: unknown): CompiledRules {
     }
   }
 
-  if (errors.length > 0) return { rules: defaults(), errors };
+  if (errors.length > 0) return { rules: closed(), errors };
 
   for (const rule of added) {
     const existing = rules.findIndex((r) => r.self === rule.self && samePath(r.segs, rule.segs));

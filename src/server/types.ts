@@ -69,4 +69,11 @@ export interface ServerContext {
 
 export interface CapabilityServer {
   routes?(apps: ServerApps, ctx: ServerContext): void;
+  /**
+   * Refuse a declaration this slice cannot run, at `POST /api/artifacts`.
+   * One message per problem; an empty array accepts. A slice that closes
+   * itself when its config is broken implements this too, so the author
+   * sees the mistake at publish rather than at the first silent refusal.
+   */
+  validateConfig?(config: unknown): string[];
 }
