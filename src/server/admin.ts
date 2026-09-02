@@ -1,6 +1,8 @@
 /**
  * Admin API on the shell origin, for tooling (`npm run publish`) and tests.
- * Guarded by the owner cookie or `Authorization: Bearer <ARTIFACT_OWNER_TOKEN>`.
+ * Guarded by the owner cookie or `Authorization: Bearer <ARTIFACT_OWNER_TOKEN>`
+ * — every route but `GET /api/artifacts/:id/version`, which any viewer may
+ * poll because it drives live reload and says nothing else.
  * A server with no credential serves it only when explicitly opened with
  * `ARTIFACT_OPEN_ADMIN=1`: it creates and overwrites artifacts.
  */
@@ -61,6 +63,9 @@ export function mountAdminApi(app: Hono, ctx: ServerContext): void {
   });
 
   app.get("/api/artifacts/:id", async (c) => {
+    // The record carries the capability declaration, the owner's viewer id
+    // and the file list: tooling reads it, a viewer never needs it.
+    if (!guard(c)) return c.json({ code: "not_writer", message: "owner only" }, 403);
     const id = c.req.param("id");
     if (!isArtifactId(id)) return c.json({ code: "invalid_content", message: "bad id" }, 400);
     const meta = await ctx.store.readMeta(id);

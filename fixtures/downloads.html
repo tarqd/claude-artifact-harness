@@ -1,0 +1,157 @@
+<main>
+  <h1>Downloads fixture</h1>
+  <p id="ns" data-state="pending" data-downloads="?">resolving&hellip;</p>
+
+  <p>
+    <button id="save-csv" type="button">Save the table as CSV</button>
+    <button id="save-png" type="button">Save the chart as PNG</button>
+    <button id="save-buffer" type="button">Save an ArrayBuffer</button>
+    <button id="save-svg" type="button">Save an SVG</button>
+    <button id="save-bad" type="button">Save an .exe</button>
+    <button id="save-empty" type="button">Save nothing</button>
+    <button id="save-huge" type="button">Save 17 MiB</button>
+    <button id="save-twice" type="button">Save twice at once</button>
+  </p>
+
+  <p id="status" data-state="idle" data-op="?" data-code="?">idle</p>
+  <p id="second" data-state="idle" data-code="?">idle</p>
+  <p>saved: <span id="saves" data-count="0">0</span></p>
+  <p>the ArrayBuffer after the call: <span id="detached" data-value="?">?</span></p>
+
+  <table id="table">
+    <thead><tr><th>region</th><th>units</th></tr></thead>
+    <tbody>
+      <tr><td>north</td><td>120</td></tr>
+      <tr><td>south</td><td>88</td></tr>
+      <tr><td>east</td><td>151</td></tr>
+    </tbody>
+  </table>
+  <canvas id="chart" width="120" height="60"></canvas>
+</main>
+<script>
+(function () {
+  var nsEl = document.getElementById('ns');
+  var statusEl = document.getElementById('status');
+  var secondEl = document.getElementById('second');
+  var savesEl = document.getElementById('saves');
+  var detachedEl = document.getElementById('detached');
+  var downloads = null;
+  var saves = 0;
+
+  function show(el, state, code, text) {
+    el.setAttribute('data-state', state);
+    el.setAttribute('data-code', code);
+    el.textContent = text;
+  }
+
+  /** Every call reports its outcome by code; the page never throws. */
+  function run(op, request, el) {
+    var target = el || statusEl;
+    if (!downloads) {
+      target.setAttribute('data-op', op);
+      show(target, 'absent', 'unavailable', 'downloads is unavailable');
+      return Promise.resolve();
+    }
+    target.setAttribute('data-op', op);
+    show(target, 'saving', '?', 'saving ' + op + '…');
+    return downloads.save(request).then(
+      function (result) {
+        saves++;
+        savesEl.setAttribute('data-count', String(saves));
+        savesEl.textContent = String(saves);
+        show(target, 'saved', result.status, op + ': ' + result.status);
+      },
+      function (error) {
+        var code = (error && error.code) || 'unknown';
+        show(target, 'rejected', code, op + ': ' + code + ' - ' + (error && error.message));
+      }
+    );
+  }
+
+  /* ------------------------------ the content ----------------------------- */
+
+  function csv() {
+    var rows = [['region', 'units']];
+    var cells = document.querySelectorAll('#table tbody tr');
+    for (var i = 0; i < cells.length; i++) {
+      var tds = cells[i].querySelectorAll('td');
+      rows.push([tds[0].textContent, tds[1].textContent]);
+    }
+    return rows
+      .map(function (row) { return row.join(','); })
+      .join('\n') + '\n';
+  }
+
+  function png() {
+    var canvas = document.getElementById('chart');
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#f0eee6';
+    ctx.fillRect(0, 0, 120, 60);
+    ctx.fillStyle = '#c96442';
+    ctx.fillRect(10, 20, 20, 40);
+    ctx.fillRect(40, 8, 20, 52);
+    ctx.fillRect(70, 32, 20, 28);
+    return new Promise(function (resolve) {
+      canvas.toBlob(function (blob) { resolve(blob); }, 'image/png');
+    });
+  }
+
+  function svg() {
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">' +
+      '<rect width="10" height="10" fill="#c96442"/></svg>';
+  }
+
+  /* ------------------------------- the buttons ---------------------------- */
+
+  document.getElementById('save-csv').addEventListener('click', function () {
+    // A path, mixed case and all: the shell decides the final name.
+    run('csv', { filename: 'reports/summary.CSV', data: csv() });
+  });
+
+  document.getElementById('save-png').addEventListener('click', function () {
+    png().then(function (blob) {
+      run('png', { filename: 'chart.png', data: blob });
+    });
+  });
+
+  document.getElementById('save-buffer').addEventListener('click', function () {
+    var buffer = new TextEncoder().encode('transferred bytes').buffer;
+    var pending = run('buffer', { filename: 'bytes.txt', data: buffer });
+    // The contract says an ArrayBuffer is transferred: it is detached now.
+    var detached = buffer.byteLength === 0 ? 'detached' : 'intact';
+    detachedEl.setAttribute('data-value', detached);
+    detachedEl.textContent = detached;
+    return pending;
+  });
+
+  document.getElementById('save-svg').addEventListener('click', function () {
+    run('svg', { filename: 'diagram.svg', data: svg() });
+  });
+
+  document.getElementById('save-bad').addEventListener('click', function () {
+    run('bad', { filename: 'installer.exe', data: 'MZ' });
+  });
+
+  document.getElementById('save-empty').addEventListener('click', function () {
+    run('empty', { filename: 'nothing.txt', data: '' });
+  });
+
+  document.getElementById('save-huge').addEventListener('click', function () {
+    run('huge', { filename: 'huge.png', data: new ArrayBuffer(17 * 1024 * 1024) });
+  });
+
+  document.getElementById('save-twice').addEventListener('click', function () {
+    run('first', { filename: 'first.txt', data: 'one' });
+    run('second', { filename: 'second.txt', data: 'two' }, secondEl);
+  });
+
+  /* -------------------------------- the mount ----------------------------- */
+
+  window.claude.use('downloads').then(function (ns) {
+    downloads = ns;
+    nsEl.setAttribute('data-downloads', ns ? 'yes' : 'no');
+    nsEl.setAttribute('data-state', 'resolved');
+    nsEl.textContent = ns ? 'downloads is available' : 'no downloads here';
+  });
+})();
+</script>

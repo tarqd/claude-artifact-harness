@@ -1,0 +1,126 @@
+<main>
+  <h1>Network fixture</h1>
+
+  <p id="ns" data-state="pending" data-methods="?">resolving&hellip;</p>
+  <p>origins(): <code id="origins" data-json="?">?</code></p>
+  <p id="shape" data-frozen="?" data-proto="?" data-thenable="?">?</p>
+
+  <p>
+    <button id="fetch-declared" type="button">Fetch the declared origin</button>
+    <button id="fetch-undeclared" type="button">Fetch an undeclared origin</button>
+  </p>
+
+  <p id="declared" data-state="idle" data-blocked="?">idle</p>
+  <p id="undeclared" data-state="idle" data-blocked="?">idle</p>
+  <p>CSP violations: <span id="violations" data-count="0" data-last="?">none</span></p>
+</main>
+<script>
+(function () {
+  var nsEl = document.getElementById('ns');
+  var originsEl = document.getElementById('origins');
+  var violationsEl = document.getElementById('violations');
+  var network = null;
+
+  /**
+   * The only reliable way for a page to tell "the CSP refused this" from "the
+   * host was unreachable": both reject `fetch` with the same opaque
+   * TypeError, but only the refusal fires `securitypolicyviolation`.
+   */
+  var violations = [];
+  document.addEventListener('securitypolicyviolation', function (ev) {
+    violations.push({ uri: ev.blockedURI, directive: ev.violatedDirective });
+    violationsEl.setAttribute('data-count', String(violations.length));
+    violationsEl.setAttribute('data-last', ev.violatedDirective + ' ' + ev.blockedURI);
+    violationsEl.textContent = JSON.stringify(violations);
+  });
+
+  /**
+   * Match on the origin as a prefix, not as a substring: `undeclared.example`
+   * contains `declared.example`, and a substring test would report the
+   * allowed origin as blocked once the refused one had fired.
+   */
+  function blockedFor(url) {
+    for (var i = 0; i < violations.length; i++) {
+      if (violations[i].uri.indexOf(url) === 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Neither host resolves, so neither fetch can succeed here; what the test
+   * reads is `data-blocked` — whether the browser refused the connection
+   * before it was ever attempted.
+   */
+  function attempt(el, url) {
+    el.setAttribute('data-state', 'fetching');
+    el.setAttribute('data-blocked', '?');
+    el.textContent = 'fetching ' + url + '…';
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 3000);
+    return fetch(url + '/probe.json', { signal: controller.signal }).then(
+      function (response) {
+        clearTimeout(timer);
+        el.setAttribute('data-state', 'ok');
+        el.setAttribute('data-blocked', 'false');
+        el.textContent = 'status ' + response.status;
+      },
+      function (err) {
+        clearTimeout(timer);
+        // Give the violation event a turn to land before we read the list.
+        return new Promise(function (resolve) { setTimeout(resolve, 50); }).then(function () {
+          el.setAttribute('data-state', 'failed');
+          el.setAttribute('data-blocked', blockedFor(url) ? 'true' : 'false');
+          el.textContent = String((err && err.name) || 'error') + ': ' + String((err && err.message) || err);
+        });
+      },
+    );
+  }
+
+  var DECLARED = 'https://declared.example';
+  var UNDECLARED = 'https://undeclared.example';
+
+  document.getElementById('fetch-declared').addEventListener('click', function () {
+    attempt(document.getElementById('declared'), DECLARED);
+  });
+  document.getElementById('fetch-undeclared').addEventListener('click', function () {
+    attempt(document.getElementById('undeclared'), UNDECLARED);
+  });
+
+  window.claude.use('network').then(function (ns) {
+    network = ns;
+    if (!network) {
+      nsEl.setAttribute('data-state', 'absent');
+      nsEl.textContent = 'network is unavailable';
+      originsEl.setAttribute('data-json', '[]');
+      originsEl.textContent = '[]';
+      return;
+    }
+    var methods = [];
+    for (var key in network) methods.push(key);
+    methods.sort();
+    nsEl.setAttribute('data-state', 'resolved');
+    nsEl.setAttribute('data-methods', methods.join(','));
+    nsEl.textContent = 'network resolved';
+
+    // The hardening every namespace gets: frozen, null-prototype, and a
+    // method that hands back a promise rather than a value.
+    var shapeEl = document.getElementById('shape');
+    var pending = network.origins();
+    shapeEl.setAttribute('data-frozen', String(Object.isFrozen(network)));
+    shapeEl.setAttribute('data-proto', String(Object.getPrototypeOf(network)));
+    shapeEl.setAttribute('data-thenable', String(!!pending && typeof pending.then === 'function'));
+    shapeEl.textContent = 'frozen/null-proto/thenable';
+
+    return pending.then(
+      function (origins) {
+        originsEl.setAttribute('data-json', JSON.stringify(origins));
+        originsEl.textContent = JSON.stringify(origins);
+      },
+      function (err) {
+        originsEl.setAttribute('data-json', 'error:' + (err && err.code));
+        originsEl.textContent = JSON.stringify(err);
+      },
+    );
+  });
+})();
+</script>

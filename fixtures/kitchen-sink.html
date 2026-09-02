@@ -1,0 +1,352 @@
+<style>
+  :root {
+    --ink: #14161a;
+    --dim: #626873;
+    --line: #e2e5ea;
+    --ground: #fbfbfc;
+    --card: #ffffff;
+    --ok: #197c4a;
+    --bad: #b4232c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #eceef2;
+      --dim: #9aa1ad;
+      --line: #2a2e36;
+      --ground: #16181c;
+      --card: #1d2026;
+      --ok: #52c98a;
+      --bad: #ff8a8a;
+    }
+  }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 54rem; margin: 0 auto; padding: 1.25rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  h2 { font-size: .95rem; margin: 1.25rem 0 .4rem; }
+  .sub { color: var(--dim); margin: 0 0 1rem; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    display: flex; gap: .6rem; align-items: baseline;
+    padding: .3rem .6rem; border: 1px solid var(--line);
+    border-radius: .4rem; background: var(--card); margin-bottom: .25rem;
+  }
+  li b { min-width: 8rem; font-weight: 600; }
+  li .detail { color: var(--dim); }
+  [data-ok="yes"] b, [data-resolved="yes"] b { color: var(--ok); }
+  [data-ok="no"] b, [data-resolved="no"] b { color: var(--bad); }
+  button {
+    font: inherit; padding: .35rem .8rem; border-radius: .4rem;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer;
+  }
+  code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+
+<main>
+  <h1>Kitchen sink</h1>
+  <p class="sub">
+    Every capability this harness serves, declared at once: each name is
+    resolved through <code>claude.use()</code>, then given one small live
+    exercise. The last section is the legacy <code>claude.complete()</code>
+    wrapper over <code>sample</code>.
+  </p>
+
+  <p id="ns" data-state="pending" data-total="0" data-resolved="0" data-null="">
+    resolving&hellip;
+  </p>
+
+  <h2>use()</h2>
+  <ul id="caps"></ul>
+
+  <h2>live checks</h2>
+  <p id="smoke" data-state="idle" data-ok="0" data-failed="0">not run yet</p>
+  <ul id="checks"></ul>
+
+  <h2>legacy</h2>
+  <p>
+    <button id="legacy" type="button">claude.complete()</button>
+    <button id="perm" type="button">re-read permissions.state('sample')</button>
+  </p>
+  <p id="legacy-out" data-state="idle" data-code="?">idle</p>
+  <p>permissions.state('sample'): <span id="perm-sample" data-value="?">?</span></p>
+  <p>page errors: <span id="errors" data-count="0">0</span></p>
+</main>
+
+<script id="app-script">
+(function () {
+  var el = function (id) { return document.getElementById(id); };
+  var nsEl = el('ns');
+  var ns = {};
+
+  /* Every name the roster can serve, aliases included. */
+  var NAMES = [
+    'artifact', 'self', 'db', 'sample', 'user',
+    'permissions', 'downloads', 'room', 'assets', 'network'
+  ];
+
+  function row(list, name, ok, detail) {
+    var li = document.createElement('li');
+    li.setAttribute('data-name', name);
+    li.setAttribute(list === 'caps' ? 'data-resolved' : 'data-ok', ok ? 'yes' : 'no');
+    li.setAttribute('data-detail', detail);
+    li.innerHTML = '<b></b><span class="detail"></span>';
+    li.querySelector('b').textContent = name;
+    li.querySelector('.detail').textContent = detail;
+    el(list).appendChild(li);
+    return li;
+  }
+
+  if (!window.claude || typeof window.claude.use !== 'function') {
+    nsEl.setAttribute('data-state', 'absent');
+    nsEl.textContent = 'window.claude is missing';
+    return;
+  }
+
+  /* ------------------------------- use() ------------------------------- */
+
+  var resolutions = NAMES.map(function (name) {
+    return Promise.resolve(window.claude.use(name)).then(
+      function (value) { return { name: name, value: value, error: null }; },
+      function (error) { return { name: name, value: null, error: error }; }
+    );
+  });
+
+  Promise.all(resolutions).then(function (rows) {
+    var resolved = 0;
+    var missing = [];
+    rows.forEach(function (r) {
+      ns[r.name] = r.value;
+      var ok = r.value !== null && r.value !== undefined;
+      if (ok) { resolved++; } else { missing.push(r.name); }
+      row(
+        'caps',
+        r.name,
+        ok,
+        ok ? typeof r.value + (Object.isFrozen(r.value) ? ' (frozen)' : '')
+           : (r.error ? 'rejected: ' + (r.error.code || r.error) : 'null')
+      );
+    });
+    nsEl.setAttribute('data-total', String(rows.length));
+    nsEl.setAttribute('data-resolved', String(resolved));
+    nsEl.setAttribute('data-null', missing.join(','));
+    nsEl.setAttribute('data-state', 'resolved');
+    nsEl.textContent = resolved + ' of ' + rows.length + ' resolved';
+    return smoke();
+  });
+
+  /* ---------------------------- live checks ---------------------------- */
+
+  var passed = 0;
+  var failed = 0;
+
+  /** Run one check; a rejection is a failure, never an unhandled error. */
+  function check(name, fn) {
+    var started;
+    try {
+      started = Promise.resolve(fn());
+    } catch (err) {
+      started = Promise.reject(err);
+    }
+    return started.then(
+      function (detail) {
+        passed++;
+        row('checks', name, true, String(detail));
+      },
+      function (err) {
+        failed++;
+        row('checks', name, false, (err && (err.code || err.message)) || String(err));
+      }
+    );
+  }
+
+  function want(condition, detail) {
+    if (!condition) throw new Error('failed: ' + detail);
+    return detail;
+  }
+
+  /** Poll `fn` until it is true, or give up. */
+  function until(fn, label, ms) {
+    var deadline = Date.now() + (ms || 8000);
+    return new Promise(function (resolve, reject) {
+      (function tick() {
+        var value;
+        try { value = fn(); } catch (err) { return reject(err); }
+        if (value) return resolve(value);
+        if (Date.now() > deadline) return reject(new Error('timed out waiting for ' + label));
+        setTimeout(tick, 50);
+      })();
+    });
+  }
+
+  function smoke() {
+    el('smoke').setAttribute('data-state', 'running');
+    el('smoke').textContent = 'running…';
+
+    var checks = [
+      check('artifact', function () {
+        want(typeof ns.artifact.publish === 'function', 'publish is a function');
+        // `self` is the legacy spelling of the same slice, so the preamble
+        // hands both names the one installed namespace.
+        want(ns.self === ns.artifact, 'self is the same namespace object');
+        return 'publish(), and self === artifact';
+      }),
+
+      check('db', function () {
+        var doc = ns.db.doc('smoke/kitchen');
+        var stamp = 'v' + Date.now();
+        var seen = null;
+        // `onSnapshot` opens the db websocket lane, which is why this check
+        // subscribes rather than just reading: the page then holds the db and
+        // the room lanes open at the same time.
+        var stop = doc.onSnapshot(function (snap) {
+          if (snap.exists) seen = snap.data().stamp;
+        });
+        return doc.set({ stamp: stamp }).then(function () {
+          return doc.get();
+        }).then(function (snap) {
+          want(snap.exists, 'the document exists after set()');
+          want(snap.data().stamp === stamp, 'the document reads back what was written');
+          return until(function () { return seen === stamp; }, 'the live snapshot');
+        }).then(function () {
+          stop();
+          return 'set/get and a live snapshot: ' + stamp;
+        }, function (err) {
+          stop();
+          throw err;
+        });
+      }),
+
+      check('sample', function () {
+        want(typeof ns.sample === 'function', 'the namespace is callable');
+        want(typeof ns.sample.limits === 'function', 'limits() is a member');
+        // Not called here: the first call asks the viewer, which the legacy
+        // button below does on purpose.
+        return ns.sample.limits().then(function (limits) {
+          return 'limits: images=' + !!limits.images + ' tools=' + !!limits.tools;
+        });
+      }),
+
+      check('user', function () {
+        return Promise.all([ns.user.id(), ns.user.canEdit(), ns.user.me()])
+          .then(function (parts) {
+            want(typeof parts[0] === 'string' && parts[0], 'id() is a viewer id');
+            want(typeof parts[1] === 'boolean', 'canEdit() is a boolean');
+            want(parts[2] && parts[2].id === parts[0], 'me() agrees with id()');
+            return 'id=' + parts[0] + ' canEdit=' + parts[1];
+          });
+      }),
+
+      check('permissions', function () {
+        return ns.permissions.state('sample').then(function (state) {
+          want(
+            ['granted', 'denied', 'prompt', 'unavailable'].indexOf(state) !== -1,
+            'a documented state'
+          );
+          el('perm-sample').setAttribute('data-value', state);
+          el('perm-sample').textContent = state;
+          return 'sample is ' + state;
+        });
+      }),
+
+      check('downloads', function () {
+        // Not called: `save()` prompts the viewer.
+        want(typeof ns.downloads.save === 'function', 'save() is a function');
+        return 'save() is present';
+      }),
+
+      check('room', function () {
+        return until(function () { return ns.room.connected(); }, 'the room lane')
+          .then(function () {
+            return ns.room.presence({ here: true });
+          })
+          .then(function () {
+            want(ns.room.peers().length >= 1, 'this document is a peer');
+            return 'connected, ' + ns.room.peers().length + ' peer(s)';
+          });
+      }),
+
+      check('assets', function () {
+        var blob = new Blob(['kitchen sink'], { type: 'text/plain' });
+        var uploaded;
+        return ns.assets.upload(blob).then(function (record) {
+          uploaded = record;
+          want(/^\/_blob\/[0-9a-f]{32}$/.test(record.url), 'a /_blob url');
+          return fetch(record.url);
+        }).then(function (response) {
+          want(response.ok, 'the blob is served from the frame origin');
+          return response.text();
+        }).then(function (text) {
+          want(text === 'kitchen sink', 'the bytes come back');
+          return ns.assets.list();
+        }).then(function (listed) {
+          want(
+            listed.assets.some(function (a) { return a.id === uploaded.id; }),
+            'the upload is listed'
+          );
+          return ns.assets.delete(uploaded.id);
+        }).then(function () {
+          return 'uploaded, fetched, listed and deleted';
+        });
+      }),
+
+      check('network', function () {
+        return ns.network.origins().then(function (origins) {
+          want(Array.isArray(origins), 'origins() is an array');
+          return 'origins: ' + origins.join(' ');
+        });
+      })
+    ];
+
+    return Promise.all(checks).then(function () {
+      el('smoke').setAttribute('data-ok', String(passed));
+      el('smoke').setAttribute('data-failed', String(failed));
+      el('smoke').setAttribute('data-state', failed === 0 ? 'passed' : 'failed');
+      el('smoke').textContent = passed + ' passed, ' + failed + ' failed';
+    });
+  }
+
+  /* ------------------------------- legacy ------------------------------- */
+
+  el('legacy').addEventListener('click', function () {
+    var out = el('legacy-out');
+    out.setAttribute('data-state', 'asking');
+    out.setAttribute('data-code', '?');
+    out.textContent = 'asking…';
+    window.claude.complete('kitchen sink').then(
+      function (text) {
+        out.setAttribute('data-state', 'done');
+        out.textContent = text;
+      },
+      function (error) {
+        out.setAttribute('data-state', 'error');
+        out.setAttribute('data-code', (error && error.code) || 'unknown');
+        out.textContent = (error && error.message) || String(error);
+      }
+    );
+  });
+
+  el('perm').addEventListener('click', function () {
+    if (!ns.permissions) return;
+    ns.permissions.state('sample').then(function (state) {
+      el('perm-sample').setAttribute('data-value', state);
+      el('perm-sample').textContent = state;
+    });
+  });
+
+  var errors = 0;
+  window.addEventListener('error', function () {
+    errors++;
+    el('errors').setAttribute('data-count', String(errors));
+    el('errors').textContent = String(errors);
+  });
+  window.addEventListener('unhandledrejection', function () {
+    errors++;
+    el('errors').setAttribute('data-count', String(errors));
+    el('errors').textContent = String(errors);
+  });
+})();
+</script>

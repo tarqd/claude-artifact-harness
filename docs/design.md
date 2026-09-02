@@ -71,7 +71,7 @@ the spine ships a compiling stub for every slice, which the slice replaces.
 ## Origins and URLs
 
 - Shell origin: `http://localhost:8787` (`SHELL_PORT`). Shell page at `/a/<artifactId>`; APIs under `/api/frame/...` mirroring claude.ai paths where sensible.
-- Frame origin: `http://<artifactId>.localhost:8788` (`FRAME_PORT`). Chromium resolves `*.localhost` to loopback. Artifact content at `/_f/<ver>/index.html` (and other files), runtime at `/_runtime/<name>.js`, blobs at `/_blob/<id>`. When the Host header has no subdomain, `/_a/<artifactId>/...` prefix form is accepted for tooling.
+- Frame origin: `http://<artifactId>.localhost:8788` (`FRAME_PORT`). Chromium resolves `*.localhost` to loopback. Artifact content at `/_f/<ver>/index.html` (and other files), runtime at `/_runtime/<name>.js`, blobs at `/_blob/<id>`. When the Host header has no subdomain, an `/_a/<artifactId>/...` prefix form is accepted for tooling — opt-in (`ARTIFACT_PREFIX_HOSTS=1`), off by default, because every artifact reached that way shares one browser origin.
 - The frame origin serves a CSP header reproducing the documented allowlist (`script-src 'self' 'unsafe-inline' cdnjs.cloudflare.com cdn.jsdelivr.net cdn.tailwindcss.com code.jquery.com; style-src 'self' 'unsafe-inline' fonts.googleapis.com; font-src fonts.gstatic.com data:; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' <network.origins>; frame-ancestors <shell origin>`).
 - Iframe attributes exactly as claude.ai: `sandbox="allow-scripts allow-same-origin allow-forms"`, `allow="fullscreen; clipboard-write; gamepad"`, `referrerpolicy="no-referrer"`, `inert` until ready.
 
@@ -128,3 +128,72 @@ Admin API on the shell origin for tooling: `POST /api/artifacts` (create from HT
 - Unit tests per slice with vitest (path grammar, validation, broker mapping, store behaviour).
 - One Playwright e2e per slice loading `fixtures/<name>.html` through the real shell and server and asserting the page-facing behaviour (e.g. a db write from one page is seen by a second page's `onSnapshot`).
 - `npm run build && npm test && npm run e2e` must pass before a slice reports done.
+
+## Status
+
+As built (integration pass, contract 0.2.32). `npm run build && npm test &&
+npm run e2e` is green: 597 unit tests, 38 Playwright specs.
+
+**Implemented.** The spine as designed above — page envelope, handshake,
+`claude.use()`, the `__frame_cap` RPC, two origins, filesystem store, auth —
+plus every slice in the v0 roster:
+
+| Slice | Backend it needed | Where it lives |
+|---|---|---|
+| `artifact` / `self` | `POST /api/frame/self/:id` | compare-and-set publish, live reload |
+| `db` | `POST /api/frame/db/:id/{call,subscribe}` + `WS /api/frame/db/ws` | documents, queries, snapshots, rules, `{self}` privacy |
+| `sample` | `POST /api/frame/sample/{call,tool_results}` | SSE streaming, page tools, images, consent, reply cache |
+| `user` | `GET /api/account`, `POST /api/frame/user/*` | viewer identity and the peer directory |
+| `permissions` | none | shell-side decisions over the shared consent key |
+| `downloads` | none | bytes go frame → shell → object URL |
+| `room` | `WS /api/frame/room/ws` | one in-memory room per artifact |
+| `assets` | `POST /api/frame/blob/:id/*`, `GET /_blob/:id` | blobs on the artifact's own origin |
+| `network` | none | the declaration → the frame origin's CSP `connect-src` |
+
+**Stubbed or out of scope.** `artifact.edit` and `artifact.sync` still reject
+`capability_disabled` (live documents). `mcp`, `comments`, `notifications`,
+`embed` are not in the roster: `use()` on them resolves `null`. `email()`
+resolves `null` — there is no account service — though the scope gate is
+implemented and tested. The `db` per-viewer rate limit and write-concurrency
+budgets are not implemented, so a page cannot observe `resource_exhausted`
+from those sources.
+
+**Deviations from this plan, and from the platform.** Each slice's
+`README.md` carries the full list with reasons; the ones that change the
+shape of the design above:
+
+- **Two spine seams were added during integration.** `ServerContext` gained
+  `onShutdown(fn)` (a slice holding an upgraded websocket must drop it before
+  `server.close()` can settle — `db` and `room` both did this by
+  monkey-patching `close`), and `serve.ts` now builds the frame origin's CSP
+  with the `network` slice's `connectSrcOrigins()` validator rather than a
+  private string filter, so the policy the browser enforces is the validated
+  subset. The `GET /_blob/:blobId` 501 placeholder was removed so the `assets`
+  slice's own route can serve the path inside the frame middleware.
+- **`permissions` must be declared.** On claude.ai the shell adds
+  `permissions: {}` implicitly; here the preamble imports a module only for
+  declared names, so an undeclared `permissions` resolves `null`. Synthesising
+  it was considered and refused: "design for absence" is the rule everywhere
+  else, and the slice's own e2e pins it.
+- **Consent is per browser, not per account.** `consent:<artifactId>:<cap>`
+  in the shell origin's `localStorage`, shared verbatim by `sample` and
+  `permissions`, so one decision governs both.
+- **The `db` lane carries rows, not ops**; the broker diffs them, so the
+  realtime path and the refresh fallback cannot drift. A page's own write is
+  applied to its subscription mirrors before the round trip (the contract's
+  latency compensation, `hasPendingWrites: true` until confirmed); an
+  `update` against rows this view does not hold is the one case that waits
+  for the server instead. Path grammar is
+  enforced in the frame unconditionally (`db.d.ts` requires the synchronous
+  `TypeError`; no `db-path-call-site` change id exists to gate it on).
+- **`sample` reads `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` and
+  `SAMPLE_BACKEND` from `process.env`**, not from `ServerConfig`, which has no
+  sampling knobs. `SAMPLE_BACKEND=fake` is a deterministic in-process backend
+  and is what the tests run against.
+- **`downloads` acks its prompt** rather than expiring it: `src/shell/consent.ts`
+  cannot withdraw an open dialog, and racing a timer would leave a modal over
+  an inert frame. The documented `declined`-on-expiry path is therefore not
+  reachable.
+- **`user.config` is always `{profile: true, email: false}`**, as decided
+  above, so a declaration's `scopes` do not reach `__frame_init`; the `email`
+  scope gate is exercised from the backend tests instead.

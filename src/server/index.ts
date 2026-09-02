@@ -51,6 +51,7 @@ export async function startServer(
   const store = createStore(config.dataDir);
   const auth = createAuth(config);
   const ws = new Registry();
+  const shutdownHooks: Array<() => void | Promise<void>> = [];
 
   const shellApp = new Hono();
   const frameApp = new Hono<FrameEnv>();
@@ -77,6 +78,9 @@ export async function startServer(
     },
     frameOriginFor: (artifactId: string) => frameOrigin(config, artifactId, framePort),
     ws,
+    onShutdown: (fn) => {
+      shutdownHooks.push(fn);
+    },
   };
 
   mountShellRoutes(shellApp, context);
@@ -92,7 +96,7 @@ export async function startServer(
     hostname: config.bindHost,
   });
   const frame = await listen({
-    fetch: (request: Request) => frameFetch(request, frameApp),
+    fetch: (request: Request) => frameFetch(request, frameApp, config.allowPrefixHosts),
     port: config.framePort,
     hostname: config.bindHost,
   });
@@ -125,6 +129,15 @@ export async function startServer(
     frameOriginFor: context.frameOriginFor,
     context,
     close: async () => {
+      // Slice hooks first: an upgraded websocket counts as an open connection,
+      // so `close()` would never settle while a lane is still attached.
+      for (const hook of shutdownHooks) {
+        try {
+          await hook();
+        } catch {
+          /* one slice's cleanup must not hold the server open */
+        }
+      }
       await Promise.all([closeServer(shellServer), closeServer(frameServer)]);
     },
   };
@@ -132,16 +145,23 @@ export async function startServer(
 
 /**
  * Accept the `/_a/<id>/...` prefix form for hosts without wildcard DNS —
- * but only on a host that is not itself an artifact origin. On
+ * but only when it is explicitly enabled (`ARTIFACT_PREFIX_HOSTS=1`), and
+ * only on a host that is not itself an artifact origin. Off by default:
+ * artifacts reached through the prefix share one browser origin, which is
+ * the isolation the per-artifact host exists to provide. On
  * `<id>.localhost` the host label is the artifact, and neither the prefix
  * form nor a client-supplied `x-artifact-id` may name another one: that
  * would serve a foreign artifact's bytes under this artifact's origin.
  */
-async function frameFetch(request: Request, app: FrameApp): Promise<Response> {
+async function frameFetch(
+  request: Request,
+  app: FrameApp,
+  allowPrefix: boolean,
+): Promise<Response> {
   const url = new URL(request.url);
   const hostLabel = (request.headers.get("host") ?? "").split(":")[0]?.split(".")[0] ?? "";
   const labelled = isArtifactId(hostLabel);
-  const match = ARTIFACT_PREFIX_RE.exec(url.pathname);
+  const match = allowPrefix ? ARTIFACT_PREFIX_RE.exec(url.pathname) : null;
   const usePrefix =
     match !== null && !labelled && (request.method === "GET" || request.method === "HEAD");
   if (!usePrefix && !request.headers.has("x-artifact-id")) return app.fetch(request);

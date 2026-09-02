@@ -7,6 +7,7 @@
 import type { Hono } from "hono";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { connectSrcOrigins } from "../capabilities/network/server.ts";
 import { runtimeModuleMap } from "../protocol/capabilities.ts";
 import { isArtifactId } from "../protocol/paths.ts";
 import type { FramePreambleConfig } from "../protocol/messages.ts";
@@ -22,6 +23,104 @@ img{max-width:100%}
 [hidden]{display:none!important}`;
 
 const DOCTYPE_RE = /^\s*<!doctype html/i;
+const LEADING_DOCTYPE_RE = /^\s*<!doctype html[^>]*>/i;
+
+/**
+ * Elements whose content is text and not markup. A `<head` inside one of
+ * them is the author's data, so the scanner steps over the whole element.
+ */
+const RAW_TEXT = new Set([
+  "script",
+  "style",
+  "textarea",
+  "title",
+  "xmp",
+  "iframe",
+  "noscript",
+  "noframes",
+  "noembed",
+]);
+
+/** Where the preamble goes: inside an existing head, or as a new one here. */
+export interface HeadInsertion {
+  kind: "in-head" | "new-head";
+  at: number;
+}
+
+/** End of a tag, honouring quoted attribute values (`data-x="<head>"`). */
+function tagEnd(html: string, from: number): number {
+  let quote: string | null = null;
+  for (let i = from; i < html.length; i++) {
+    const ch = html[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === ">") return i + 1;
+  }
+  return html.length;
+}
+
+function skipPast(html: string, from: number, marker: string): number {
+  const at = html.indexOf(marker, from);
+  return at === -1 ? html.length : at + marker.length;
+}
+
+/**
+ * Find the preamble's insertion point by scanning the markup rather than
+ * matching its text: a `<head` inside a comment, an attribute value or a
+ * script's source is data, and injecting there would either strand the
+ * runtime outside the document or splice a `</script>` into author code.
+ *
+ * The first `<head>` wins; a `<body>` reached first means the document has
+ * no head, so one is opened in front of it. `<html>` is only the fallback
+ * (`null` when even that is absent — the caller inserts after the doctype).
+ */
+export function findHeadInsertion(html: string): HeadInsertion | null {
+  let htmlAt: number | null = null;
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf("<", i);
+    if (lt === -1) break;
+    if (html.startsWith("<!--", lt)) {
+      i = skipPast(html, lt + 4, "-->");
+      continue;
+    }
+    if (html.startsWith("<![CDATA[", lt)) {
+      i = skipPast(html, lt + 9, "]]>");
+      continue;
+    }
+    const after = html[lt + 1];
+    if (after === "!" || after === "?") {
+      i = tagEnd(html, lt + 1);
+      continue;
+    }
+    const name = /^<(\/?)([a-zA-Z][^\s/>]*)/.exec(html.slice(lt, lt + 64));
+    if (!name) {
+      i = lt + 1;
+      continue;
+    }
+    const closing = name[1] === "/";
+    const tag = name[2]!.toLowerCase();
+    const end = tagEnd(html, lt + 1);
+    if (!closing && RAW_TEXT.has(tag)) {
+      const close = new RegExp(`</${tag}(?=[\\s/>])`, "i").exec(html.slice(end));
+      i = close ? end + close.index + close[0].length : html.length;
+      continue;
+    }
+    if (!closing) {
+      if (tag === "head") return { kind: "in-head", at: end };
+      if (tag === "body") return { kind: "new-head", at: lt };
+      if (tag === "html") htmlAt = end;
+    }
+    i = end;
+  }
+  return htmlAt === null ? null : { kind: "new-head", at: htmlAt };
+}
 
 /** JSON safe to inline in a `<script>` element. */
 export function inlineJson(value: unknown): string {
@@ -61,18 +160,12 @@ export function buildEnvelope(html: string, options: EnvelopeOptions): string {
     // `<head`, not `<header`: a document whose first element is a `<header>`
     // must still get a real head, or the preamble would land in the body,
     // after page scripts have already run.
-    const head = /<head(?=[\s>])[^>]*>/i.exec(html);
-    if (head) {
-      const at = head.index + head[0].length;
-      return html.slice(0, at) + block + html.slice(at);
+    const found = findHeadInsertion(html);
+    if (found?.kind === "in-head") {
+      return html.slice(0, found.at) + block + html.slice(found.at);
     }
-    const htmlTag = /<html[^>]*>/i.exec(html);
-    if (htmlTag) {
-      const at = htmlTag.index + htmlTag[0].length;
-      return `${html.slice(0, at)}<head>${block}</head>${html.slice(at)}`;
-    }
-    const doctype = /<!doctype html[^>]*>/i.exec(html);
-    const at = doctype ? doctype.index + doctype[0].length : 0;
+    const doctype = LEADING_DOCTYPE_RE.exec(html);
+    const at = found ? found.at : doctype ? doctype[0].length : 0;
     return `${html.slice(0, at)}<head>${block}</head>${html.slice(at)}`;
   }
 
@@ -159,14 +252,6 @@ function artifactIdFrom(host: string | undefined, header: string | undefined): s
   return header && isArtifactId(header) ? header : null;
 }
 
-function networkOrigins(capabilities: Record<string, { config?: unknown }> | undefined): string[] {
-  const config = capabilities?.network?.config;
-  if (typeof config !== "object" || config === null) return [];
-  const origins = (config as { origins?: unknown }).origins;
-  if (!Array.isArray(origins)) return [];
-  return origins.filter((o): o is string => typeof o === "string");
-}
-
 export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
   app.get("/login", (c) => {
     const ok = ctx.auth.login(c, c.req.query("token") ?? "");
@@ -198,7 +283,13 @@ export function mountShellRoutes(app: Hono, ctx: ServerContext): void {
       shellPort: ctx.shellPort,
       framePort: ctx.framePort,
     });
-    return c.html(renderShellPage(boot));
+    // The consent dialog lives on this page: it must not be framed, and its
+    // type must not be sniffed. (The frame origin gets its own headers in
+    // `mountFrameRoutes`; this is the same posture for the decision surface.)
+    return c.html(renderShellPage(boot), 200, {
+      "content-security-policy": "frame-ancestors 'none'",
+      "x-content-type-options": "nosniff",
+    });
   });
 
   app.get("/", (c) => c.text("claude-artifact-harness: open /a/<artifactId>"));
@@ -210,7 +301,13 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
   app.use("*", async (c, next) => {
     const id = artifactIdFrom(c.req.header("host"), c.req.header("x-artifact-id"));
     const meta = id ? await ctx.store.readMeta(id) : null;
-    c.header("content-security-policy", frameCsp(ctx.shellOrigin, networkOrigins(meta?.capabilities)));
+    // `connect-src` comes from the `network` slice's validator, not from the
+    // raw declaration: the declared strings land inside a security header, so
+    // they are re-emitted from `URL.origin` and capped there (network/server.ts).
+    c.header(
+      "content-security-policy",
+      frameCsp(ctx.shellOrigin, connectSrcOrigins(meta?.capabilities)),
+    );
     c.header("x-content-type-options", "nosniff");
     c.header("referrer-policy", "no-referrer");
 
@@ -242,10 +339,9 @@ export function mountFrameRoutes(app: FrameApp, ctx: ServerContext): void {
     });
   });
 
-  // Assets land here once the assets slice ships.
-  app.get("/_blob/:blobId", (c) =>
-    c.json({ code: "unavailable", message: "the assets slice is not installed" }, 501),
-  );
+  // `/_blob/<id>` is served by the `assets` slice (mounted after these
+  // routes). No placeholder here: Hono ends the chain at the first handler
+  // that returns a response, so one registered before the slice would hide it.
 
   app.get("/_f/:ver", (c) => c.redirect(`${c.req.path}/`));
 

@@ -1,0 +1,117 @@
+<main>
+  <h1>Permissions fixture</h1>
+  <p id="ns" data-state="pending" data-permissions="?">resolving&hellip;</p>
+  <dl>
+    <dt>state()</dt>
+    <dd id="map" data-value="?">?</dd>
+    <dt>state("sample")</dt>
+    <dd id="sample" data-value="?">?</dd>
+    <dt>state("downloads")</dt>
+    <dd id="downloads" data-value="?">?</dd>
+    <dt>state("db") — never declared</dt>
+    <dd id="db" data-value="?">?</dd>
+    <dt>state("mcp:Google Calendar") — scoped</dt>
+    <dd id="scoped" data-value="?">?</dd>
+  </dl>
+  <p>
+    <button id="request" type="button">Request sample</button>
+    <button id="request-all" type="button">Request everything</button>
+    <button id="request-bad" type="button">Request 33 names</button>
+    <button id="refresh" type="button">Re-read state</button>
+  </p>
+  <p id="result" data-state="idle" data-value="?" data-ask="0">idle</p>
+  <p>asks: <span id="asks" data-count="0">0</span></p>
+</main>
+<script>
+(function () {
+  var nsEl = document.getElementById('ns');
+  var els = {
+    map: document.getElementById('map'),
+    sample: document.getElementById('sample'),
+    downloads: document.getElementById('downloads'),
+    db: document.getElementById('db'),
+    scoped: document.getElementById('scoped')
+  };
+  var resultEl = document.getElementById('result');
+  var asksEl = document.getElementById('asks');
+  var asks = 0;
+  var permissions = null;
+
+  function show(el, value) {
+    var text = typeof value === 'string' ? value : JSON.stringify(value);
+    el.setAttribute('data-value', text);
+    el.textContent = text;
+  }
+
+  function fail(el) {
+    return function (error) {
+      show(el, 'rejected:' + ((error && error.code) || 'unknown'));
+    };
+  }
+
+  // Every read tolerates a rejection, exactly as the contract tells pages to.
+  function refresh() {
+    if (!permissions) return Promise.resolve();
+    return Promise.all([
+      permissions.state().then(function (v) { show(els.map, v); }, fail(els.map)),
+      permissions.state('sample').then(function (v) { show(els.sample, v); }, fail(els.sample)),
+      permissions.state('downloads').then(function (v) { show(els.downloads, v); }, fail(els.downloads)),
+      permissions.state('db').then(function (v) { show(els.db, v); }, fail(els.db)),
+      permissions.state('mcp:Google Calendar').then(function (v) { show(els.scoped, v); }, fail(els.scoped))
+    ]);
+  }
+
+  function ask(names) {
+    if (!permissions) {
+      resultEl.setAttribute('data-state', 'absent');
+      show(resultEl, 'permissions is unavailable');
+      return;
+    }
+    asks++;
+    var thisAsk = asks;
+    asksEl.setAttribute('data-count', String(asks));
+    asksEl.textContent = String(asks);
+    resultEl.setAttribute('data-state', 'asking');
+    show(resultEl, 'asking');
+    var call = names === null ? permissions.request() : permissions.request(names);
+    call.then(
+      function (states) {
+        resultEl.setAttribute('data-ask', String(thisAsk));
+        resultEl.setAttribute('data-state', 'answered');
+        show(resultEl, states);
+        return refresh();
+      },
+      function (error) {
+        resultEl.setAttribute('data-ask', String(thisAsk));
+        resultEl.setAttribute('data-state', 'error');
+        show(resultEl, 'error:' + ((error && error.code) || 'unknown'));
+      }
+    );
+  }
+
+  document.getElementById('request').addEventListener('click', function () { ask(['sample']); });
+  document.getElementById('request-all').addEventListener('click', function () { ask(null); });
+  document.getElementById('request-bad').addEventListener('click', function () {
+    var many = [];
+    for (var i = 0; i < 33; i++) many.push('cap' + i);
+    ask(many);
+  });
+  document.getElementById('refresh').addEventListener('click', function () { refresh(); });
+
+  if (!window.claude || typeof window.claude.use !== 'function') {
+    nsEl.setAttribute('data-state', 'absent');
+    nsEl.textContent = 'window.claude is not present (inert copy)';
+    return;
+  }
+
+  window.claude.use('permissions').then(function (ns) {
+    permissions = ns;
+    nsEl.setAttribute('data-permissions', ns ? 'yes' : 'no');
+    nsEl.setAttribute('data-frozen', ns && Object.isFrozen(ns) ? 'yes' : 'no');
+    return refresh();
+  }).then(function () {
+    nsEl.setAttribute('data-state', 'resolved');
+    nsEl.textContent = 'permissions:' + (permissions ? 'yes' : 'no');
+  });
+})();
+</script>

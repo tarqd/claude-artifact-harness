@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildEnvelope, frameCsp, inlineJson, RESET_CSS } from "../../src/server/serve.ts";
+import {
+  buildEnvelope,
+  findHeadInsertion,
+  frameCsp,
+  inlineJson,
+  RESET_CSS,
+} from "../../src/server/serve.ts";
 import { extractTitle } from "../../src/server/store.ts";
 import type { FramePreambleConfig } from "../../src/protocol/messages.ts";
 
@@ -48,6 +54,57 @@ describe("page envelope", () => {
     expect(html.indexOf("__FRAME_PREAMBLE")).toBeLessThan(html.indexOf("<header"));
     expect(html).toContain("<head><script>window.__FRAME_PREAMBLE=");
     expect(html).toContain('<header id="h">hi</header>');
+  });
+
+  it("ignores a <head> that is only text: a comment, an attribute, a script", () => {
+    // A leading licence or conditional comment is ordinary authoring, and the
+    // preamble must still land in the document's real head.
+    const commented = buildEnvelope(
+      "<!doctype html><!-- <head>decoy</head> --><html><head><title>T</title></head>" +
+        "<body>b</body></html>",
+      options,
+    );
+    expect(commented).toContain("<html><head><script>window.__FRAME_PREAMBLE=");
+    expect(commented.indexOf("__FRAME_PREAMBLE")).toBeLessThan(commented.indexOf("<title>T"));
+    // the decoy is left exactly as written, and no second head is opened
+    expect(commented).toContain("<!-- <head>decoy</head> -->");
+    expect(commented.slice(commented.indexOf("-->")).match(/<head>/g)).toHaveLength(1);
+
+    // A `<head>` inside an attribute value must not split the attribute.
+    const attribute = buildEnvelope(
+      '<!doctype html><html><body data-x="<head>">hi</body></html>',
+      options,
+    );
+    expect(attribute).toContain("<html><head><script>window.__FRAME_PREAMBLE=");
+    expect(attribute).toContain('</head><body data-x="<head>">hi</body>');
+
+    // A `<head>` inside a script's source must not receive a `</script>`.
+    const scripted = buildEnvelope(
+      '<!doctype html><script>const s = "<head>";</script><p>x</p>',
+      options,
+    );
+    expect(scripted).toContain('<script>const s = "<head>";</script>');
+    expect(scripted.indexOf("__FRAME_PREAMBLE")).toBeLessThan(scripted.indexOf("const s ="));
+    expect(scripted.startsWith("<!doctype html><head><script>window.__FRAME_PREAMBLE=")).toBe(
+      true,
+    );
+  });
+
+  it("finds the insertion point outside comments, attributes and raw text", () => {
+    expect(findHeadInsertion("<!doctype html><html><head>x")).toEqual({
+      kind: "in-head",
+      at: "<!doctype html><html><head>".length,
+    });
+    // No head: the head is opened in front of the body, not after it.
+    expect(findHeadInsertion("<!doctype html><html><body>x")).toEqual({
+      kind: "new-head",
+      at: "<!doctype html><html>".length,
+    });
+    // Neither: the caller falls back to the doctype.
+    expect(findHeadInsertion("<!doctype html><p>x</p>")).toBeNull();
+    // An unterminated comment or raw-text element swallows the rest.
+    expect(findHeadInsertion("<!doctype html><!-- <head>")).toBeNull();
+    expect(findHeadInsertion("<!doctype html><style>/* <head> */")).toBeNull();
   });
 
   it("never lets the preamble config close the script element", () => {

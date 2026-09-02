@@ -1,0 +1,161 @@
+<main>
+  <h1>Ask Claude</h1>
+  <p id="ns" data-state="pending" data-sample="?">resolving&hellip;</p>
+  <p id="limits" data-images="?" data-tools="?" data-max="?">limits&hellip;</p>
+
+  <label for="prompt">Prompt</label>
+  <input id="prompt" type="text" value="hello" size="40">
+
+  <p>
+    <button id="ask" type="button">Ask</button>
+    <button id="askfresh" type="button">Ask (no cache)</button>
+    <button id="asktools" type="button">Ask with tool</button>
+    <button id="askjson" type="button">Ask for JSON</button>
+    <button id="askimage" type="button">Ask about an image</button>
+    <button id="stop" type="button">Stop</button>
+  </p>
+
+  <p id="status" data-state="idle">idle</p>
+  <p>code: <span id="code"></span></p>
+  <p>deltas: <span id="deltas">0</span></p>
+  <p>tool runs: <span id="toolruns">0</span></p>
+  <pre id="out"></pre>
+  <pre id="jsonout"></pre>
+  <pre id="legacy"></pre>
+</main>
+<script>
+(function () {
+  var nsEl = document.getElementById('ns');
+  var limitsEl = document.getElementById('limits');
+  var statusEl = document.getElementById('status');
+  var codeEl = document.getElementById('code');
+  var deltasEl = document.getElementById('deltas');
+  var toolRunsEl = document.getElementById('toolruns');
+  var outEl = document.getElementById('out');
+  var jsonEl = document.getElementById('jsonout');
+  var legacyEl = document.getElementById('legacy');
+  var promptEl = document.getElementById('prompt');
+
+  var sample = null;
+  var controller = null;
+  var deltas = 0;
+  var toolRuns = 0;
+
+  function status(state, text) {
+    statusEl.setAttribute('data-state', state);
+    statusEl.textContent = text || state;
+  }
+
+  function onText(update) {
+    // `text` is the whole answer so far, `delta` only the new part.
+    deltas += 1;
+    deltasEl.textContent = String(deltas);
+    outEl.textContent = update.text;
+  }
+
+  var tool = {
+    name: 'page_title',
+    description: 'Returns a label the page keeps. Takes no arguments.',
+    execute: function () {
+      toolRuns += 1;
+      toolRunsEl.textContent = String(toolRuns);
+      return 'fixture-tool-' + toolRuns;
+    }
+  };
+
+  if (!window.claude || typeof window.claude.use !== 'function') {
+    nsEl.setAttribute('data-state', 'absent');
+    return;
+  }
+
+  window.claude.use('sample').then(function (ns) {
+    sample = ns;
+    nsEl.setAttribute('data-sample', ns ? 'yes' : 'no');
+    nsEl.setAttribute('data-callable', typeof ns === 'function' ? 'yes' : 'no');
+    nsEl.setAttribute('data-state', 'resolved');
+    if (!ns) return;
+    return ns.limits().then(function (limits) {
+      limitsEl.setAttribute('data-images', limits.images ? 'yes' : 'no');
+      limitsEl.setAttribute('data-tools', limits.tools ? 'yes' : 'no');
+      limitsEl.setAttribute('data-max', String(limits.maxPromptBytes));
+      limitsEl.textContent = JSON.stringify(limits);
+    });
+  });
+
+  /** A small PNG made in the page, to exercise the image path for real. */
+  function makeImage() {
+    return new Promise(function (resolve) {
+      var canvas = document.createElement('canvas');
+      canvas.width = 40;
+      canvas.height = 30;
+      var context = canvas.getContext('2d');
+      context.fillStyle = '#3366cc';
+      context.fillRect(0, 0, 40, 30);
+      context.fillStyle = '#ffffff';
+      context.fillRect(8, 8, 10, 10);
+      canvas.toBlob(resolve, 'image/png');
+    });
+  }
+
+  function ask(kind, blob) {
+    if (!sample) {
+      status('unavailable');
+      return;
+    }
+    controller = new AbortController();
+    var options = { onText: onText, signal: controller.signal };
+    if (kind === 'fresh') options.cache = false;
+    if (kind === 'tools') options.tools = [tool];
+    if (blob) options.images = [blob];
+
+    deltas = 0;
+    deltasEl.textContent = '0';
+    outEl.textContent = '';
+    jsonEl.textContent = '';
+    codeEl.textContent = '';
+    status('streaming');
+
+    var promise = kind === 'json'
+      ? sample.json(promptEl.value, options)
+      : sample(promptEl.value, options);
+
+    promise.then(function (result) {
+      if (kind === 'json') {
+        jsonEl.textContent = JSON.stringify(result);
+        status('done');
+        return;
+      }
+      outEl.textContent = result.text;
+      status('done', 'done truncated=' + result.truncated + ' tier=' + result.modelTierApplied);
+    }, function (error) {
+      // The one failure shape: {code, message, text?}. `text` is the part of
+      // the answer the page may keep on screen.
+      codeEl.textContent = error && error.code;
+      if (error && typeof error.text === 'string') outEl.textContent = error.text;
+      status('error', 'error ' + (error && error.message));
+    });
+  }
+
+  document.getElementById('ask').addEventListener('click', function () { ask('plain'); });
+  document.getElementById('askfresh').addEventListener('click', function () { ask('fresh'); });
+  document.getElementById('asktools').addEventListener('click', function () { ask('tools'); });
+  document.getElementById('askjson').addEventListener('click', function () { ask('json'); });
+  document.getElementById('askimage').addEventListener('click', function () {
+    makeImage().then(function (blob) { ask('image', blob); });
+  });
+  document.getElementById('stop').addEventListener('click', function () {
+    if (controller) controller.abort();
+  });
+
+  // The legacy chat-artifact API, served by the preamble over this namespace.
+  window.legacyComplete = function (prompt) {
+    return window.claude.complete(prompt).then(function (text) {
+      legacyEl.textContent = text;
+      return text;
+    }, function (error) {
+      legacyEl.textContent = 'error ' + (error && error.code);
+      return 'error';
+    });
+  };
+})();
+</script>

@@ -1,0 +1,227 @@
+<style>
+  :root {
+    --ink: #14161a;
+    --dim: #626873;
+    --line: #e2e5ea;
+    --ground: #fbfbfc;
+    --card: #ffffff;
+    --accent: #3b5bdb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #eceef2;
+      --dim: #9aa1ad;
+      --line: #2a2e36;
+      --ground: #16181c;
+      --card: #1d2026;
+      --accent: #8ea2ff;
+    }
+  }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 62rem; margin: 0 auto; padding: 1.25rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  .sub { color: var(--dim); margin: 0 0 1rem; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: .75rem; }
+  button {
+    font: inherit; padding: .35rem .8rem; border-radius: .4rem;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  #board {
+    position: relative; height: 260px; border: 1px solid var(--line);
+    border-radius: .5rem; background: var(--card); overflow: hidden; touch-action: none;
+  }
+  .cursor {
+    position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px;
+    border-radius: 50%; background: var(--accent);
+  }
+  .cursor span {
+    position: absolute; left: 12px; top: -4px; white-space: nowrap;
+    font-size: 11px; color: var(--dim);
+  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { border-bottom: 1px solid var(--line); padding: .3rem 0; font-family: ui-monospace, monospace; font-size: 12px; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 0 0 .4rem; }
+  code { font-family: ui-monospace, monospace; }
+</style>
+
+<main>
+  <h1>Room fixture — cursors, presence and moments</h1>
+  <p class="sub" id="ns" data-state="pending" data-room="?">resolving&hellip;</p>
+
+  <div class="row">
+    <button id="wave" type="button">Emit a wave</button>
+    <button id="move" type="button">Move to a fixed spot</button>
+    <button id="rename" type="button">Set a name</button>
+    <span id="status" data-conn="no" data-peers="0" data-me="" data-terminal="">offline</span>
+  </div>
+
+  <div id="board"></div>
+
+  <div class="grid">
+    <section>
+      <h2>Peers <span id="peer-count" data-count="0">0</span></h2>
+      <ul id="peers"></ul>
+    </section>
+    <section>
+      <h2>Moments <span id="log-count" data-count="0">0</span></h2>
+      <ul id="log"></ul>
+    </section>
+  </div>
+</main>
+
+<script>
+(function () {
+  var nsEl = document.getElementById('ns');
+  var statusEl = document.getElementById('status');
+  var peersEl = document.getElementById('peers');
+  var peerCountEl = document.getElementById('peer-count');
+  var logEl = document.getElementById('log');
+  var logCountEl = document.getElementById('log-count');
+  var boardEl = document.getElementById('board');
+  var room = null;
+  var waves = 0;
+  var logged = 0;
+
+  function paintStatus() {
+    if (!room) return;
+    statusEl.setAttribute('data-conn', room.connected() ? 'yes' : 'no');
+    statusEl.textContent = room.connected() ? 'connected' : 'offline';
+  }
+
+  function paintPeers(list) {
+    peersEl.textContent = '';
+    boardEl.textContent = '';
+    var mine = '';
+    list.forEach(function (p) {
+      if (p.isMe && p.sameTab) mine = p.peer;
+      var li = document.createElement('li');
+      li.setAttribute('data-peer', p.peer);
+      li.setAttribute('data-me', p.isMe ? 'yes' : 'no');
+      li.setAttribute('data-sametab', p.sameTab ? 'yes' : 'no');
+      li.setAttribute('data-who', (p.presence && p.presence.who) || '');
+      var c = p.presence && p.presence.cursor;
+      li.setAttribute('data-x', c ? String(c.x) : '');
+      li.setAttribute('data-y', c ? String(c.y) : '');
+      li.textContent =
+        p.peer.slice(0, 8) + (p.isMe ? ' (you)' : '') + ' — ' +
+        ((p.presence && p.presence.who) || 'anonymous') +
+        (c ? ' @ ' + c.x + ',' + c.y : ' — no cursor');
+      peersEl.append(li);
+
+      if (c && !(p.isMe && p.sameTab)) {
+        var dot = document.createElement('div');
+        dot.className = 'cursor';
+        dot.setAttribute('data-peer', p.peer);
+        dot.style.left = (c.x * 100) + '%';
+        dot.style.top = (c.y * 100) + '%';
+        var tag = document.createElement('span');
+        tag.textContent = (p.presence && p.presence.who) || p.peer.slice(0, 6);
+        dot.append(tag);
+        boardEl.append(dot);
+      }
+    });
+    peerCountEl.setAttribute('data-count', String(list.length));
+    peerCountEl.textContent = String(list.length);
+    statusEl.setAttribute('data-peers', String(list.length));
+    statusEl.setAttribute('data-me', mine);
+  }
+
+  function note(msg) {
+    var li = document.createElement('li');
+    li.setAttribute('data-topic', msg.topic);
+    li.setAttribute('data-peer', msg.peer);
+    li.setAttribute('data-isme', msg.isMe ? 'yes' : 'no');
+    li.setAttribute('data-sametab', msg.sameTab ? 'yes' : 'no');
+    li.setAttribute('data-kind', msg.kind);
+    li.textContent = msg.topic + ' ' + JSON.stringify(msg.data) +
+      (msg.sameTab ? ' (you, this tab)' : msg.isMe ? ' (your other tab)' : '');
+    logEl.append(li);
+    logged += 1;
+    logCountEl.setAttribute('data-count', String(logged));
+    logCountEl.textContent = String(logged);
+  }
+
+  if (!window.claude || typeof window.claude.use !== 'function') {
+    nsEl.setAttribute('data-state', 'absent');
+    nsEl.textContent = 'window.claude is not present (inert copy)';
+    return;
+  }
+
+  window.claude.use('room').then(function (ns) {
+    room = ns;
+    nsEl.setAttribute('data-state', 'resolved');
+    nsEl.setAttribute('data-room', ns ? 'yes' : 'no');
+    if (!ns) {
+      // Design for absence: a complete single-viewer page, no spinner.
+      nsEl.textContent = 'no room in this view — running alone';
+      return;
+    }
+    nsEl.textContent = 'room ready';
+
+    room.onPeers(function (change) {
+      paintPeers(change.peers);
+      nsEl.setAttribute('data-joined', String(change.joined.length));
+      nsEl.setAttribute('data-left', String(change.left.length));
+      nsEl.setAttribute('data-updated', String(change.updated.length));
+    }, function (err) {
+      statusEl.setAttribute('data-terminal', err.code);
+    });
+
+    room.onConnection(function () {
+      paintStatus();
+    }, function (err) {
+      statusEl.setAttribute('data-terminal', err.code);
+    });
+
+    room.on('reaction', note, function (err) {
+      statusEl.setAttribute('data-terminal', err.code);
+    });
+
+    room.on('admin.only', note, function (err) {
+      statusEl.setAttribute('data-terminal', err.code);
+    });
+
+    boardEl.addEventListener('pointermove', function (ev) {
+      var box = boardEl.getBoundingClientRect();
+      room.presence({
+        cursor: {
+          x: Math.round(((ev.clientX - box.left) / box.width) * 1000) / 1000,
+          y: Math.round(((ev.clientY - box.top) / box.height) * 1000) / 1000
+        }
+      });
+    });
+
+    document.getElementById('move').addEventListener('click', function () {
+      room.presence({ cursor: { x: 0.42, y: 0.31 } });
+    });
+
+    document.getElementById('rename').addEventListener('click', function () {
+      room.presence({ who: 'viewer-' + String(Date.now()).slice(-4) });
+    });
+
+    document.getElementById('wave').addEventListener('click', function () {
+      waves += 1;
+      room.emit('reaction', { kind: 'wave', n: waves }).catch(function (err) {
+        statusEl.setAttribute('data-emit-error', err.code + ': ' + err.message);
+      });
+    });
+
+    // Prove the strict validator and the v0 answer for the Claude hand-off.
+    room.canSendToClaudeSession().then(function (answer) {
+      statusEl.setAttribute('data-can-send', answer);
+    }, function () {
+      statusEl.setAttribute('data-can-send', 'off');
+    });
+
+    paintStatus();
+    paintPeers(room.peers());
+  });
+})();
+</script>

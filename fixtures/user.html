@@ -1,0 +1,161 @@
+<main>
+  <h1>Who is here</h1>
+  <p id="ns" data-state="pending" data-user="?">resolving&hellip;</p>
+
+  <section>
+    <h2>Me</h2>
+    <p id="me"
+       data-id=""
+       data-name=""
+       data-owner="?"
+       data-canedit="?"
+       data-email="none"
+       data-color=""
+       data-avatar="none">not loaded</p>
+    <p>
+      <img id="me-avatar" alt="" width="32" height="32" />
+      <span id="me-label">&hellip;</span>
+    </p>
+    <p id="members" data-id="?" data-name="?" data-owner="?" data-canedit="?" data-avatar="?" data-email="?">
+      individual members not read yet
+    </p>
+  </section>
+
+  <section>
+    <h2>Resolve ids</h2>
+    <input id="ids" type="text" value="" placeholder="comma-separated ids" />
+    <button id="resolve" type="button">Resolve</button>
+    <p id="profiles-state" data-state="idle" data-count="0">idle</p>
+    <ul id="profiles"></ul>
+  </section>
+
+  <section>
+    <h2>Search</h2>
+    <input id="q" type="text" value="" />
+    <button id="search" type="button">Search</button>
+    <p id="search-state" data-state="idle" data-count="0" data-names="">idle</p>
+  </section>
+
+  <p id="threw" data-any="no">no method threw</p>
+</main>
+<script>
+(function () {
+  var nsEl = document.getElementById('ns');
+  var meEl = document.getElementById('me');
+  var membersEl = document.getElementById('members');
+  var threwEl = document.getElementById('threw');
+  var profilesEl = document.getElementById('profiles');
+  var profilesState = document.getElementById('profiles-state');
+  var searchState = document.getElementById('search-state');
+
+  function note(el, name, value) {
+    el.setAttribute('data-' + name, String(value));
+  }
+
+  /** Every documented method must reject-never-throw; record any synchronous throw. */
+  function guard(fn) {
+    try {
+      return Promise.resolve(fn());
+    } catch (err) {
+      note(threwEl, 'any', 'yes');
+      threwEl.textContent = 'threw: ' + err;
+      return Promise.resolve(null);
+    }
+  }
+
+  window.claude.use('user').then(function (user) {
+    note(nsEl, 'user', user ? 'yes' : 'no');
+    nsEl.setAttribute('data-state', 'resolved');
+    if (!user) {
+      nsEl.textContent = 'user is not available in this view';
+      return;
+    }
+    nsEl.textContent = 'user resolved';
+
+    // The whole surface at once: me() plus each individual member, so the
+    // test can see that they agree.
+    return Promise.all([
+      guard(function () { return user.me(); }),
+      guard(function () { return user.id(); }),
+      guard(function () { return user.name(); }),
+      guard(function () { return user.isOwner(); }),
+      guard(function () { return user.canEdit(); }),
+      guard(function () { return user.avatarUrl(); }),
+      guard(function () { return user.email(); })
+    ]).then(function (all) {
+      var me = all[0] || {};
+      note(meEl, 'id', me.id || '');
+      note(meEl, 'name', me.name || '');
+      note(meEl, 'owner', me.isOwner === true ? 'yes' : 'no');
+      note(meEl, 'canedit', me.canEdit === true ? 'yes' : 'no');
+      note(meEl, 'email', me.email == null ? 'none' : me.email);
+      note(meEl, 'color', me.color || '');
+      note(meEl, 'avatar', kindOf(me.avatarUrl));
+      meEl.textContent = (me.name || '(unnamed)') + ' — ' + (me.id || 'no id');
+
+      var img = document.getElementById('me-avatar');
+      if (me.avatarUrl) img.src = me.avatarUrl;
+      document.getElementById('me-label').textContent = me.name || '(unnamed)';
+
+      note(membersEl, 'id', all[1] === me.id ? 'match' : 'differs');
+      note(membersEl, 'name', all[2] === me.name ? 'match' : 'differs');
+      note(membersEl, 'owner', all[3] === me.isOwner ? 'match' : 'differs');
+      note(membersEl, 'canedit', all[4] === me.canEdit ? 'match' : 'differs');
+      note(membersEl, 'avatar', all[5] === me.avatarUrl ? 'match' : 'differs');
+      note(membersEl, 'email', all[6] === me.email ? 'match' : 'differs');
+      membersEl.textContent = 'individual members read';
+    });
+  });
+
+  function kindOf(url) {
+    if (!url) return 'none';
+    return url.indexOf('data:image/svg+xml') === 0 ? 'data-uri' : 'remote';
+  }
+
+  function ns() {
+    return window.claude.use('user');
+  }
+
+  document.getElementById('resolve').addEventListener('click', function () {
+    var raw = document.getElementById('ids').value;
+    var ids = raw.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    profilesState.setAttribute('data-state', 'pending');
+    ns().then(function (user) {
+      if (!user) return {};
+      return guard(function () { return user.profiles(ids); });
+    }).then(function (map) {
+      profilesEl.textContent = '';
+      var keys = Object.keys(map || {});
+      keys.forEach(function (id) {
+        var p = map[id];
+        var li = document.createElement('li');
+        li.setAttribute('data-id', p.id);
+        li.setAttribute('data-name', p.name);
+        li.setAttribute('data-color', p.color);
+        li.setAttribute('data-isme', p.isMe ? 'yes' : 'no');
+        li.setAttribute('data-avatar', kindOf(p.avatarUrl));
+        li.textContent = (p.name || '(unresolved)') + ' — ' + p.id;
+        profilesEl.appendChild(li);
+      });
+      profilesState.setAttribute('data-count', String(keys.length));
+      profilesState.setAttribute('data-state', 'resolved');
+      profilesState.textContent = 'resolved ' + keys.length;
+    });
+  });
+
+  document.getElementById('search').addEventListener('click', function () {
+    var q = document.getElementById('q').value;
+    searchState.setAttribute('data-state', 'pending');
+    ns().then(function (user) {
+      if (!user) return [];
+      return guard(function () { return user.search(q); });
+    }).then(function (rows) {
+      rows = rows || [];
+      searchState.setAttribute('data-count', String(rows.length));
+      searchState.setAttribute('data-names', rows.map(function (r) { return r.name; }).join('|'));
+      searchState.setAttribute('data-state', 'resolved');
+      searchState.textContent = 'found ' + rows.length;
+    });
+  });
+})();
+</script>

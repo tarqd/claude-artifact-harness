@@ -1,0 +1,169 @@
+<main>
+  <h1>Assets fixture</h1>
+  <p id="ns" data-state="pending" data-assets="?">resolving&hellip;</p>
+
+  <p>
+    <button id="upload" type="button">Upload the canvas as PNG</button>
+    <button id="upload-typed" type="button">Upload CSV with an explicit type</button>
+    <button id="upload-bad-type" type="button">Upload a .exe</button>
+    <button id="upload-big-svg" type="button">Upload a 3 MiB SVG</button>
+    <button id="upload-nonsense" type="button">Upload a string</button>
+    <button id="list" type="button">List</button>
+    <button id="delete" type="button">Delete the last upload</button>
+    <button id="delete-nonsense" type="button">Delete "../secret"</button>
+  </p>
+
+  <p id="status" data-state="idle" data-op="?" data-code="?">idle</p>
+  <p>
+    last upload:
+    <span id="uploaded" data-state="none" data-id="?" data-url="?" data-type="?" data-size="0">none</span>
+  </p>
+  <p>
+    listed: <span id="count" data-count="?">?</span> assets,
+    usage <span id="usage" data-count="?" data-bytes="?">?</span>
+  </p>
+
+  <canvas id="chart" width="120" height="60"></canvas>
+  <p>rendered from its own origin:</p>
+  <img id="shot" alt="" data-state="empty" width="120" height="60">
+</main>
+<script>
+(function () {
+  var nsEl = document.getElementById('ns');
+  var statusEl = document.getElementById('status');
+  var uploadedEl = document.getElementById('uploaded');
+  var countEl = document.getElementById('count');
+  var usageEl = document.getElementById('usage');
+  var shot = document.getElementById('shot');
+  var assets = null;
+  var last = null;
+
+  function show(state, op, code, text) {
+    statusEl.setAttribute('data-state', state);
+    statusEl.setAttribute('data-op', op);
+    statusEl.setAttribute('data-code', code);
+    statusEl.textContent = text;
+  }
+
+  /** Every call reports its outcome by code; the page never throws. */
+  function run(op, call) {
+    if (!assets) {
+      show('absent', op, 'unavailable', 'assets is unavailable');
+      return Promise.resolve();
+    }
+    show('running', op, '?', op + '…');
+    return call().then(
+      function (result) {
+        show('ok', op, 'ok', op + ': ok');
+        return result;
+      },
+      function (error) {
+        var code = (error && error.code) || 'unknown';
+        show('rejected', op, code, op + ': ' + code + ' - ' + (error && error.message));
+        return null;
+      }
+    );
+  }
+
+  /* ------------------------------- the content ---------------------------- */
+
+  function png() {
+    var canvas = document.getElementById('chart');
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#f0eee6';
+    ctx.fillRect(0, 0, 120, 60);
+    ctx.fillStyle = '#c96442';
+    ctx.fillRect(10, 20, 20, 40);
+    ctx.fillRect(40, 8, 20, 52);
+    ctx.fillRect(70, 32, 20, 28);
+    return new Promise(function (resolve) {
+      canvas.toBlob(function (blob) { resolve(blob); }, 'image/png');
+    });
+  }
+
+  function remember(record) {
+    if (!record) return;
+    last = record;
+    uploadedEl.setAttribute('data-state', 'ok');
+    uploadedEl.setAttribute('data-id', record.id);
+    uploadedEl.setAttribute('data-url', record.url);
+    uploadedEl.setAttribute('data-type', record.type);
+    uploadedEl.setAttribute('data-size', String(record.size));
+    uploadedEl.textContent = record.url;
+  }
+
+  /* ------------------------------- the buttons ---------------------------- */
+
+  document.getElementById('upload').addEventListener('click', function () {
+    png().then(function (blob) {
+      // The Blob carries its own type; no options needed.
+      return run('upload', function () { return assets.upload(blob); }).then(function (record) {
+        remember(record);
+        if (!record) return;
+        // The url is relative: it resolves against this artifact's origin.
+        shot.setAttribute('data-state', 'loading');
+        shot.onload = function () { shot.setAttribute('data-state', 'loaded'); };
+        shot.onerror = function () { shot.setAttribute('data-state', 'error'); };
+        shot.src = record.url;
+      });
+    });
+  });
+
+  document.getElementById('upload-typed').addEventListener('click', function () {
+    var blob = new Blob(['region,units\nnorth,120\n'], { type: 'application/octet-stream' });
+    run('upload-typed', function () {
+      return assets.upload(blob, { type: 'text/csv' });
+    }).then(remember);
+  });
+
+  document.getElementById('upload-bad-type').addEventListener('click', function () {
+    var blob = new Blob(['MZ'], { type: 'application/x-msdownload' });
+    run('upload-bad-type', function () { return assets.upload(blob); });
+  });
+
+  document.getElementById('upload-big-svg').addEventListener('click', function () {
+    var filler = new Array(3 * 1024 * 1024).join('x');
+    var blob = new Blob(['<svg xmlns="http://www.w3.org/2000/svg"><!--' + filler + '--></svg>'], {
+      type: 'image/svg+xml'
+    });
+    run('upload-big-svg', function () { return assets.upload(blob); });
+  });
+
+  document.getElementById('upload-nonsense').addEventListener('click', function () {
+    run('upload-nonsense', function () { return assets.upload('not a blob'); });
+  });
+
+  document.getElementById('list').addEventListener('click', function () {
+    run('list', function () { return assets.list(); }).then(function (result) {
+      if (!result) return;
+      countEl.setAttribute('data-count', String(result.assets.length));
+      countEl.textContent = String(result.assets.length);
+      usageEl.setAttribute('data-count', String(result.usage.count));
+      usageEl.setAttribute('data-bytes', String(result.usage.bytes));
+      usageEl.textContent = result.usage.count + ' / ' + result.usage.bytes + ' bytes';
+    });
+  });
+
+  document.getElementById('delete').addEventListener('click', function () {
+    if (!last) {
+      show('idle', 'delete', 'none', 'nothing uploaded yet');
+      return;
+    }
+    // Delete by url, the form a page keeps around.
+    run('delete', function () { return assets.delete(last.url); });
+  });
+
+  document.getElementById('delete-nonsense').addEventListener('click', function () {
+    run('delete-nonsense', function () { return assets.delete('/_blob/../secret'); });
+  });
+
+  /* -------------------------------- the mount ----------------------------- */
+
+  window.claude.use('assets').then(function (ns) {
+    assets = ns;
+    nsEl.setAttribute('data-assets', ns ? 'yes' : 'no');
+    nsEl.setAttribute('data-state', 'resolved');
+    nsEl.textContent = ns ? 'assets is available' : 'no assets here';
+  });
+})();
+</script>

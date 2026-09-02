@@ -57,6 +57,14 @@ export interface ServerContext {
   shellOrigin: string;
   frameOriginFor(artifactId: string): string;
   ws: WsRegistry;
+  /**
+   * Run `fn` when the server is closing, before the listeners are closed.
+   * `server.close()` waits for every open connection and an upgraded
+   * websocket is still one, so a slice holding a lane registers a hook that
+   * drops its sockets. Hooks run once, in registration order; a throwing or
+   * rejecting hook is ignored so one slice cannot block the shutdown.
+   */
+  onShutdown(fn: () => void | Promise<void>): void;
 }
 
 export interface CapabilityServer {

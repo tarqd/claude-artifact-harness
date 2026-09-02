@@ -62,10 +62,14 @@ describe("broker dispatch", () => {
     expect(reply.error?.code).toBe("capability_disabled");
   });
 
-  it("refuses a stub slice's calls even when declared", async () => {
+  it("dispatches a declared slice's call to that slice, not to a refusal", async () => {
+    // Every roster slice now ships, so a declared capability reaches its own
+    // broker: `db.get` is answered by `db` (here, an argument complaint),
+    // never by the registry's `capability_disabled`.
     const ctx = context({ boot: boot({ artifact: { config: {} }, db: { config: {} } }) });
     const reply = await dispatch({ cap: "db", id: "b1", method: "get", args: [] }, ctx);
-    expect(reply.error).toMatchObject({ code: "capability_disabled", message: "db.get is not available in this view" });
+    expect(reply.error?.code).not.toBe("capability_disabled");
+    expect(reply.error).toMatchObject({ code: "invalid_argument" });
   });
 
   it("serves `artifact` to a page that declared the legacy `self` spelling", async () => {

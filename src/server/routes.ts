@@ -18,7 +18,9 @@ const SLICES: ReadonlyArray<readonly [string, CapabilityServer]> = [
   ["assets", assets],
   ["db", db],
   ["downloads", downloads],
-  ["network", network],
+  // `network` mounts nothing: its whole backend is the `connect-src` that
+  // `serve.ts` builds from its validator, so the module has no `routes`.
+  ["network", network as CapabilityServer],
   ["permissions", permissions],
   ["room", room],
   ["sample", sample],

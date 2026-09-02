@@ -32,6 +32,13 @@ export interface ServerConfig {
    * (`ARTIFACT_OPEN_ADMIN=1`) because it is a write API with no credential.
    */
   openAdminApi: boolean;
+  /**
+   * Serve the frame origin's `/_a/<artifactId>/...` prefix form. Opt-in
+   * (`ARTIFACT_PREFIX_HOSTS=1`) because every artifact reached that way
+   * shares one browser origin: it is a tooling path for hosts without
+   * wildcard DNS, not a way to open an artifact.
+   */
+  allowPrefixHosts: boolean;
   /** Asset-token lifetime in seconds. */
   assetTokenTtlSec: number;
   /** How often an idle view polls for a new version (ms; 0 disables). */
@@ -59,6 +66,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     ownerToken: process.env.ARTIFACT_OWNER_TOKEN ?? null,
     defaultLevel: level === "admin" ? "admin" : level === "view" ? "view" : "interact",
     openAdminApi: process.env.ARTIFACT_OPEN_ADMIN === "1",
+    allowPrefixHosts: process.env.ARTIFACT_PREFIX_HOSTS === "1",
     assetTokenTtlSec: intEnv("ARTIFACT_TOKEN_TTL", 30 * 60),
     versionPollMs: intEnv("VERSION_POLL_MS", 5000),
     ...overrides,

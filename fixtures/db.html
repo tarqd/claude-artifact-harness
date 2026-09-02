@@ -1,0 +1,200 @@
+<main>
+  <h1>Shared task list</h1>
+  <p id="ns" data-state="pending" data-db="?" data-frozen="?">resolving&hellip;</p>
+
+  <section>
+    <h2>Tasks (shared by every viewer)</h2>
+    <input id="title" type="text" value="" />
+    <button id="add" type="button">Add</button>
+    <button id="toggle" type="button">Toggle first</button>
+    <button id="clear" type="button">Clear</button>
+    <p>count: <span id="count">-</span></p>
+    <p id="meta" data-fromcache="?" data-pending="?" data-deliveries="0">metadata</p>
+    <p id="changes" data-last="">no changes yet</p>
+    <ul id="tasks"></ul>
+    <p id="status" data-state="idle">idle</p>
+  </section>
+
+  <section>
+    <h2>My private note (data/users/&lt;my id&gt;/profile)</h2>
+    <input id="note-path" type="text" value="" />
+    <button id="watch-note" type="button">Watch</button>
+    <input id="note" type="text" value="" />
+    <button id="save-note" type="button">Save</button>
+    <p id="note-view" data-exists="?"></p>
+  </section>
+
+  <section>
+    <h2>Peek at another path</h2>
+    <input id="peek-path" type="text" value="" />
+    <button id="peek" type="button">Read</button>
+    <button id="poke" type="button">Write</button>
+    <p id="peek-result" data-exists="?" data-code=""></p>
+    <p id="poke-result" data-code=""></p>
+  </section>
+
+  <section>
+    <h2>Path grammar</h2>
+    <button id="grammar" type="button">Build a bad ref</button>
+    <p id="grammar-result" data-name="" data-thrown="?"></p>
+  </section>
+</main>
+<script id="app-script">
+(function () {
+  var el = function (id) { return document.getElementById(id); };
+  var nsEl = el('ns');
+  var db = null;
+  var tasks = null;
+  var stop = null;
+  var stopNote = null;
+
+  // The viewer's own subtree is addressed by the viewer's real id - the one
+  // `claude.user.id()` resolves to on the platform - so the host fills it in.
+  function notePath() {
+    return el('note-path').value;
+  }
+
+  function setStatus(state, text) {
+    el('status').setAttribute('data-state', state);
+    el('status').textContent = text;
+  }
+
+  function fail(prefix) {
+    return function (error) {
+      setStatus('error', prefix + ' ' + (error && error.code) + ': ' + (error && error.message));
+    };
+  }
+
+  function renderTasks(snap) {
+    var list = el('tasks');
+    list.textContent = '';
+    snap.docs.forEach(function (doc) {
+      var li = document.createElement('li');
+      var data = doc.data();
+      li.setAttribute('data-id', doc.id);
+      li.setAttribute('data-done', data.done ? 'yes' : 'no');
+      li.textContent = data.title;
+      list.appendChild(li);
+    });
+    el('count').textContent = String(snap.size);
+    var meta = el('meta');
+    meta.setAttribute('data-fromcache', snap.metadata.fromCache ? 'yes' : 'no');
+    meta.setAttribute('data-pending', snap.metadata.hasPendingWrites ? 'yes' : 'no');
+    meta.setAttribute(
+      'data-deliveries',
+      String(Number(meta.getAttribute('data-deliveries') || '0') + 1)
+    );
+    var changes = snap.docChanges().map(function (c) {
+      return c.type + ':' + c.doc.id + ':' + c.oldIndex + '->' + c.newIndex;
+    });
+    el('changes').setAttribute('data-last', changes.join(','));
+    el('changes').textContent = changes.join(' ');
+  }
+
+  if (!window.claude || typeof window.claude.use !== 'function') {
+    nsEl.setAttribute('data-state', 'absent');
+    return;
+  }
+
+  window.claude.use('db').then(function (ns) {
+    db = ns;
+    nsEl.setAttribute('data-db', db ? 'yes' : 'no');
+    nsEl.setAttribute('data-frozen', db && Object.isFrozen(db) ? 'yes' : 'no');
+    nsEl.setAttribute('data-state', 'resolved');
+    if (!db) return;
+
+    tasks = db.collection('tasks');
+    stop = tasks.orderBy('at').limit(50).onSnapshot(renderTasks, function (error) {
+      setStatus('sub-error', 'subscription ' + error.code + ': ' + error.message);
+    });
+  });
+
+  el('watch-note').addEventListener('click', function () {
+    if (!db || !notePath()) { return setStatus('unavailable', 'no note path'); }
+    if (stopNote) { stopNote(); }
+    stopNote = db.doc(notePath()).onSnapshot(function (snap) {
+      var view = el('note-view');
+      view.setAttribute('data-exists', snap.exists ? 'yes' : 'no');
+      view.textContent = snap.exists ? String(snap.data().note) : '(none)';
+    }, function (error) {
+      setStatus('note-error', 'note ' + error.code);
+    });
+  });
+
+  el('add').addEventListener('click', function () {
+    if (!tasks) { return setStatus('unavailable', 'db is unavailable'); }
+    var title = el('title').value || 'untitled';
+    setStatus('adding', 'adding');
+    tasks.add({ title: title, done: false, at: Date.now() }).then(function (ref) {
+      setStatus('added', 'added ' + ref.id);
+      el('title').value = '';
+    }, fail('add'));
+  });
+
+  el('toggle').addEventListener('click', function () {
+    var first = el('tasks').querySelector('li');
+    if (!first || !tasks) { return setStatus('unavailable', 'nothing to toggle'); }
+    var done = first.getAttribute('data-done') === 'yes';
+    tasks.doc(first.getAttribute('data-id')).update({ done: !done }).then(function () {
+      setStatus('toggled', 'toggled');
+    }, fail('toggle'));
+  });
+
+  el('clear').addEventListener('click', function () {
+    if (!tasks) { return setStatus('unavailable', 'db is unavailable'); }
+    var ids = [].slice.call(el('tasks').querySelectorAll('li')).map(function (li) {
+      return li.getAttribute('data-id');
+    });
+    Promise.all(ids.map(function (id) { return tasks.doc(id).delete(); })).then(function () {
+      setStatus('cleared', 'cleared ' + ids.length);
+    }, fail('clear'));
+  });
+
+  el('save-note').addEventListener('click', function () {
+    if (!db || !notePath()) { return setStatus('unavailable', 'no note path'); }
+    db.doc(notePath()).set({ note: el('note').value }).then(function () {
+      setStatus('note-saved', 'note saved');
+    }, fail('note'));
+  });
+
+  el('peek').addEventListener('click', function () {
+    var result = el('peek-result');
+    result.setAttribute('data-code', '');
+    try {
+      db.doc(el('peek-path').value).get().then(function (snap) {
+        result.setAttribute('data-exists', snap.exists ? 'yes' : 'no');
+        result.textContent = snap.exists ? JSON.stringify(snap.data()) : '(missing)';
+      }, function (error) {
+        result.setAttribute('data-exists', 'error');
+        result.setAttribute('data-code', error.code);
+      });
+    } catch (err) {
+      result.setAttribute('data-exists', 'threw');
+      result.setAttribute('data-code', err.name);
+    }
+  });
+
+  el('poke').addEventListener('click', function () {
+    var result = el('poke-result');
+    result.setAttribute('data-code', 'pending');
+    db.doc(el('peek-path').value).set({ note: 'intruder' }).then(function () {
+      result.setAttribute('data-code', 'wrote');
+    }, function (error) {
+      result.setAttribute('data-code', error.code);
+      result.textContent = error.message;
+    });
+  });
+
+  el('grammar').addEventListener('click', function () {
+    var result = el('grammar-result');
+    try {
+      db.doc('tasks');
+      result.setAttribute('data-thrown', 'no');
+    } catch (err) {
+      result.setAttribute('data-thrown', 'yes');
+      result.setAttribute('data-name', err.name);
+      result.textContent = err.message;
+    }
+  });
+})();
+</script>
